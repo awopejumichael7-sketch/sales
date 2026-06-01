@@ -960,6 +960,7 @@ function seedData() {
     // Clear old data to force re-seed with variants
     ["products","sales","customers","debts","advance","inventoryLogs"].forEach(k=>Store.set(k,[]));
   }
+  const seedNow = Date.now();
   const products = [
     { id: uid(), name: "Premium Rice (50kg)", sku: "RCE-001", category: "Grains", price: 45000, cost: 38000, qty: 120, lowStock: 20, emoji: "🌾",
       variants:[{unitType:"Bag",qtyPerUnit:1,price:45000,cost:38000},{unitType:"Piece",qtyPerUnit:1,price:2800,cost:2200}] },
@@ -986,6 +987,7 @@ function seedData() {
     { id: uid(), name: "Detergent 2kg", sku: "DTG-001", category: "Household", price: 2800, cost: 2200, qty: 0, lowStock: 10, emoji: "🧴",
       variants:[{unitType:"Piece",qtyPerUnit:1,price:2800,cost:2200},{unitType:"Dozen",qtyPerUnit:12,price:31000,cost:24000}] },
   ];
+  products.forEach(p => { if (!p.createdAt) p.createdAt = seedNow; });
   Store.set("products", products);
 
   const customers = [
@@ -993,6 +995,7 @@ function seedData() {
     { id: uid(), name: "Fatima Bello", phone: "08098765432", address: "24 Allen Ave, Ikeja", email: "fatima@email.com", createdAt: Date.now()-86400000*3 },
     { id: uid(), name: "Emeka Okafor", phone: "07011223344", address: "8 Opebi Road, Ikeja", email: "", createdAt: Date.now()-86400000*1 },
   ];
+  customers.forEach(c => { if (!c.createdAt) c.createdAt = seedNow; });
   Store.set("customers", customers);
 
   // Seed a few sales
@@ -1006,24 +1009,48 @@ function seedData() {
     { id: uid(), txId: "TXN-"+Math.random().toString(36).substr(2,8).toUpperCase(), customer:{name:"Biodun Afolabi",phone:"08077889900"}, items:[{id:p[8].id,name:p[8].name,qty:3,price:p[8].price},{id:p[9].id,name:p[9].name,qty:5,price:p[9].price}], subtotal:14100, discount:0, tax:0, total:14100, payMethod:"transfer_cash", splitPayment:{transfer:10000,cash:4100,combined:14100}, salesRep:"Sarah Johnson", date:now-7200000, status:"completed" },
     { id: uid(), txId: "TXN-"+Math.random().toString(36).substr(2,8).toUpperCase(), customer:{name:"Chidi Nwosu",phone:"08044556677"}, items:[{id:p[5].id,name:p[5].name,qty:2,price:p[5].price},{id:p[10].id,name:p[10].name,qty:1,price:p[10].price}], subtotal:7400, discount:0, tax:0, total:7400, payMethod:"pos_cash", splitPayment:{pos:5000,cash:2400,combined:7400}, salesRep:"Mike Chen", date:now-3600000*2, status:"completed" },
   ];
+  sales.forEach(s => { if (!s.createdAt) s.createdAt = seedNow; });
   Store.set("sales", sales);
 
   // Seed a debt
   const debts = [
     { id:uid(), customerId:"", customerName:"Ade Williams", customerPhone:"08055667788", goods:"Rice x3, Oil x1", totalAmount:143500, amountPaid:50000, balance:93500, dueDate:futureDate(14), payHistory:[{amount:50000,date:Date.now()-86400000*2,note:"Partial payment"}], status:"partially_paid", createdAt:Date.now()-86400000*5 }
   ];
+  debts.forEach(d => { if (!d.createdAt) d.createdAt = seedNow; });
   Store.set("debts", debts);
 
   // Seed an advance payment
   const advances = [
     { id:uid(), customerName:"Grace Eze", customerPhone:"08033221100", product:"Premium Rice x5", amountPaid:150000, totalCost:225000, balance:75000, expectedPickup:futureDate(7), status:"pending", notes:"Will collect after payday", createdAt:Date.now()-86400000*2 }
   ];
+  advances.forEach(a => { if (!a.createdAt) a.createdAt = seedNow; });
   Store.set("advance", advances);
 }
 
 /* ============================================================
+   PENDING WRITES QUEUE — buffers offline writes for replay
+   ============================================================ */
+const PendingQueue = {
+  key: "apexpos_pendingWrites",
+  get() { try { return JSON.parse(localStorage.getItem(this.key)) || []; } catch { return []; } },
+  add(op) {
+    const q = this.get();
+    q.push({ ...op, queuedAt: Date.now() });
+    try { localStorage.setItem(this.key, JSON.stringify(q)); } catch {}
+  },
+  clear() { try { localStorage.removeItem(this.key); } catch {} },
+  remove(idx) {
+    const q = this.get();
+    q.splice(idx, 1);
+    try { localStorage.setItem(this.key, JSON.stringify(q)); } catch {}
+  }
+};
+
+/* ============================================================
    FIREBASE INIT (optional — graceful fallback)
    ============================================================ */
+const FS_COLLECTIONS = ["products","sales","customers","debts","advance","inventoryLogs"];
+
 async function initFirebase() {
   // Skip if config looks like it hasn't been filled in
   if (!FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("YOUR_") ||
@@ -1033,80 +1060,233 @@ async function initFirebase() {
   }
   try {
     const { initializeApp, getApps, getApp } = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js");
-    const { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy, enableIndexedDbPersistence } =
+    const { initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+            collection, addDoc, setDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot,
+            query, orderBy, serverTimestamp } =
       await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js");
-    // Avoid "already initialized" error if initFirebase is called more than once
+
+    // Avoid "already initialized" error on hot-reloads
     const app = getApps().length ? getApp() : initializeApp(FIREBASE_CONFIG);
-    db = getFirestore(app);
-    // Enable offline persistence so the app works when the connection drops
-    try {
-      await enableIndexedDbPersistence(db);
-    } catch(pe) {
-      if (pe.code === "failed-precondition") {
-        console.warn("Firestore persistence: multiple tabs open — persistence disabled");
-      } else if (pe.code === "unimplemented") {
-        console.warn("Firestore persistence: browser does not support it");
-      }
-    }
+
+    // Use modern persistent cache (replaces deprecated enableIndexedDbPersistence)
+    // persistentMultipleTabManager allows multi-tab offline support without errors
+    db = initializeFirestore(app, {
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+    });
+
     useFirebase = true;
     console.log("✅ Firebase connected");
-    // Expose Firestore methods globally for use
-    window.fsLib = { collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy };
+
+    // Expose Firestore methods globally
+    window.fsLib = { collection, addDoc, setDoc, getDocs, updateDoc, deleteDoc, doc,
+                     onSnapshot, query, orderBy, serverTimestamp };
     window.db = db;
+
+    // 1) Upload any data that was created offline (pending queue)
+    await replayPendingWrites();
+
+    // 2) Upload any seeded/local records that have no fsId yet
+    await syncLocalToFirestore();
+
+    // 3) Subscribe to real-time updates so all devices stay in sync
+    subscribeAllCollections();
+
     toast("Firebase connected — cloud sync active", "success", "Cloud Sync");
   } catch(e) {
     console.warn("Firebase init failed — using localStorage mode:", e.message || e);
     useFirebase = false;
-    toast("Running in offline mode (localStorage)", "warning", "Local Mode");
+    // Replay pending writes when we come back online
+    window.addEventListener("online", () => {
+      if (!useFirebase) initFirebase();
+    }, { once: true });
+  }
+}
+
+/* Upload pending offline writes to Firestore */
+async function replayPendingWrites() {
+  const queue = PendingQueue.get();
+  if (!queue.length) return;
+  let replayed = 0;
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const op = queue[i];
+    try {
+      const { setDoc, updateDoc, deleteDoc, doc, collection, addDoc } = window.fsLib;
+      if (op.type === "add") {
+        // Use setDoc with the stable local id as the Firestore document ID
+        await setDoc(doc(window.db, op.col, op.id), op.data);
+        // Update the local record's fsId
+        const arr = Store.get(op.col);
+        const idx = arr.findIndex(x => x.id === op.id);
+        if (idx !== -1) { arr[idx].fsId = op.id; Store.set(op.col, arr); }
+      } else if (op.type === "update") {
+        await updateDoc(doc(window.db, op.col, op.fsId || op.id), op.data);
+      } else if (op.type === "delete") {
+        await deleteDoc(doc(window.db, op.col, op.fsId || op.id));
+      }
+      PendingQueue.remove(i);
+      replayed++;
+    } catch(e) {
+      console.warn("Pending write replay failed:", e);
+    }
+  }
+  if (replayed > 0) console.log(`✅ Replayed ${replayed} pending offline write(s)`);
+}
+
+/* Push all local records that have no fsId up to Firestore */
+async function syncLocalToFirestore() {
+  const { setDoc, doc } = window.fsLib;
+  for (const col of FS_COLLECTIONS) {
+    const arr = Store.get(col);
+    const needsSync = arr.filter(x => !x.fsId);
+    for (const item of needsSync) {
+      try {
+        // Use the stable local id as the Firestore document ID for consistency
+        await setDoc(doc(window.db, col, item.id), item);
+        item.fsId = item.id;
+      } catch(e) {
+        console.warn(`syncLocalToFirestore failed for ${col}/${item.id}:`, e);
+      }
+    }
+    if (needsSync.length > 0) Store.set(col, arr);
+  }
+}
+
+/* Real-time listeners — merge Firestore state into localStorage + refresh UI */
+const _unsubscribers = [];
+function subscribeAllCollections() {
+  // Unsubscribe any existing listeners first (safety for re-init)
+  _unsubscribers.forEach(u => u());
+  _unsubscribers.length = 0;
+
+  const { collection, onSnapshot, query, orderBy } = window.fsLib;
+  for (const col of FS_COLLECTIONS) {
+    const unsub = onSnapshot(
+      query(collection(window.db, col), orderBy("createdAt", "asc")),
+      (snapshot) => {
+        // Build a merged array: Firestore is source of truth for records it has
+        const local = Store.get(col);
+        const localMap = {};
+        local.forEach(x => { localMap[x.id] = x; });
+
+        snapshot.forEach(docSnap => {
+          const remote = { ...docSnap.data(), fsId: docSnap.id };
+          // Use the Firestore doc's custom id field if present, else use fsId
+          const stableId = remote.id || remote.fsId;
+          remote.id = stableId;
+          localMap[stableId] = remote;
+        });
+
+        // Handle deletions: remove local items whose fsId exists in Firestore
+        // but the snapshot no longer contains them
+        const firestoreIds = new Set();
+        snapshot.forEach(d => {
+          const data = d.data();
+          firestoreIds.add(data.id || d.id);
+        });
+        // Only remove records that Firestore explicitly knows about (has ever had fsId)
+        const merged = Object.values(localMap).filter(x =>
+          !x.fsId || firestoreIds.has(x.id)
+        );
+
+        Store.set(col, merged);
+
+        // Refresh current page if it displays this collection
+        const pageMap = {
+          products: ["products","dashboard","checkout"],
+          sales: ["sales","dashboard","reports"],
+          customers: ["customers","checkout"],
+          debts: ["debts","dashboard"],
+          advance: ["advance","dashboard"],
+          inventoryLogs: ["inventory"]
+        };
+        if (pageMap[col]?.includes(currentPage)) {
+          const renders = { dashboard:renderDashboard, checkout:renderCheckout,
+            products:renderProducts, customers:renderCustomers, sales:renderSales,
+            debts:renderDebts, advance:renderAdvance, inventory:renderInventory,
+            reports:renderReports };
+          renders[currentPage]?.();
+          updateNavBadges?.();
+        }
+      },
+      (err) => console.warn(`Firestore snapshot error [${col}]:`, err)
+    );
+    _unsubscribers.push(unsub);
   }
 }
 
 /* ============================================================
-   FIRESTORE CRUD HELPERS (with localStorage fallback)
+   FIRESTORE CRUD HELPERS (with localStorage fallback + offline queue)
    ============================================================ */
 async function fsAdd(colName, data) {
-  const item = { ...data, id: uid(), createdAt: Date.now() };
-  if (useFirebase && window.fsLib) {
-    try {
-      const ref = await window.fsLib.addDoc(window.fsLib.collection(window.db, colName), item);
-      item.fsId = ref.id;
-    } catch(e) { console.warn("Firestore add failed:", e) }
-  }
+  // Generate a stable local id used as BOTH the app id AND Firestore document id
+  const item = { ...data, id: data.id || uid(), createdAt: data.createdAt || Date.now() };
+
+  // Write to localStorage immediately so the UI is never blocked
   const arr = Store.get(colName);
   arr.push(item);
   Store.set(colName, arr);
+
+  if (useFirebase && window.fsLib) {
+    try {
+      // Use setDoc with our stable id so Firestore doc id === item.id
+      await window.fsLib.setDoc(window.fsLib.doc(window.db, colName, item.id), item);
+      item.fsId = item.id;
+      // Persist the fsId back to localStorage
+      const arr2 = Store.get(colName);
+      const idx = arr2.findIndex(x => x.id === item.id);
+      if (idx !== -1) { arr2[idx].fsId = item.id; Store.set(colName, arr2); }
+    } catch(e) {
+      console.warn("Firestore add failed — queued for retry:", e);
+      PendingQueue.add({ type:"add", col:colName, id:item.id, data:item });
+    }
+  } else if (!useFirebase) {
+    // Queue so the write is replayed when Firebase comes online
+    PendingQueue.add({ type:"add", col:colName, id:item.id, data:item });
+  }
   return item;
 }
 
 async function fsUpdate(colName, id, data) {
   const arr = Store.get(colName);
   const idx = arr.findIndex(x => x.id === id);
-  if (idx !== -1) {
-    arr[idx] = { ...arr[idx], ...data, updatedAt: Date.now() };
-    Store.set(colName, arr);
-    // Sync to Firestore if connected and item has a Firestore document ID
-    if (useFirebase && window.fsLib && arr[idx].fsId) {
-      try {
-        await window.fsLib.updateDoc(window.fsLib.doc(window.db, colName, arr[idx].fsId), { ...data, updatedAt: Date.now() });
-      } catch(e) { console.warn("Firestore update failed:", e); }
+  if (idx === -1) return;
+  const updatedAt = Date.now();
+  arr[idx] = { ...arr[idx], ...data, updatedAt };
+  Store.set(colName, arr);
+
+  const fsId = arr[idx].fsId || id; // fall back to stable id
+  const payload = { ...data, updatedAt };
+
+  if (useFirebase && window.fsLib) {
+    try {
+      await window.fsLib.updateDoc(window.fsLib.doc(window.db, colName, fsId), payload);
+    } catch(e) {
+      console.warn("Firestore update failed — queued for retry:", e);
+      PendingQueue.add({ type:"update", col:colName, id, fsId, data:payload });
     }
+  } else {
+    PendingQueue.add({ type:"update", col:colName, id, fsId, data:payload });
   }
 }
 
 async function fsDelete(colName, id) {
-  // Delete from Firestore if connected
+  const arr = Store.get(colName);
+  const item = arr.find(x => x.id === id);
+  const fsId = item?.fsId || id;
+
+  // Delete from localStorage immediately
+  Store.set(colName, arr.filter(x => x.id !== id));
+
   if (useFirebase && window.fsLib) {
     try {
-      const arr = Store.get(colName);
-      const item = arr.find(x => x.id === id);
-      if (item?.fsId) {
-        await window.fsLib.deleteDoc(window.fsLib.doc(window.db, colName, item.fsId));
-      }
-    } catch(e) { console.warn("Firestore delete failed:", e); }
+      await window.fsLib.deleteDoc(window.fsLib.doc(window.db, colName, fsId));
+    } catch(e) {
+      console.warn("Firestore delete failed — queued for retry:", e);
+      PendingQueue.add({ type:"delete", col:colName, id, fsId });
+    }
+  } else {
+    PendingQueue.add({ type:"delete", col:colName, id, fsId });
   }
-  // Always delete from localStorage
-  const arr = Store.get(colName).filter(x => x.id !== id);
-  Store.set(colName, arr);
 }
 
 function fsGet(colName) { return Store.get(colName); }
@@ -1210,14 +1390,27 @@ function checkSession() {
 /* ============================================================
    APP INITIALIZATION
    ============================================================ */
-function initApp() {
+async function initApp() {
   seedData();
   renderSidebar();
   updateUserDisplay();
   startClock();
   monitorOnline();
+  // Initialize Firebase first so the dashboard renders with synced cloud data.
+  // A 4-second timeout prevents blocking the UI if Firebase is slow.
+  const fbTimeout = new Promise(res => setTimeout(res, 4000));
+  await Promise.race([initFirebase(), fbTimeout]);
   navigateTo("dashboard");
-  initFirebase();
+
+  // Re-attempt Firebase init whenever the browser comes back online
+  window.addEventListener("online", async () => {
+    if (!useFirebase) {
+      await initFirebase();
+      navigateTo(currentPage); // Refresh current page with synced data
+    } else {
+      await replayPendingWrites();
+    }
+  });
 }
 
 function updateUserDisplay() {
@@ -1251,7 +1444,7 @@ function monitorOnline() {
   const update = () => {
     const online = navigator.onLine;
     badge.className = "online-badge" + (online ? "" : " offline");
-    text.textContent = online ? "Online" : "Offline";
+    text.textContent = online ? (useFirebase ? "Synced" : "Online") : "Offline";
   };
   update();
   window.addEventListener("online", update);
