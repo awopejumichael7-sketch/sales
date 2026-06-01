@@ -902,12 +902,12 @@ letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px}
    The app falls back to localStorage when Firebase is unavailable.
    ============================================================ */
 const FIREBASE_CONFIG = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  : "AIzaSyD5lKDf8-Qn-NRstjGkABACMOCSy8hIoRo",
+  authDomain: "sales-730f6.firebaseapp.com",
+  projectId: "sales-730f6",
+  storageBucket: "sales-730f6.firebasestorage.app",
+  messagingSenderId: "1092112780655",
+  appId: "1:1092112780655:web:441cb1d4bc6eaa8423ac9a"
 };
 
 /* ============================================================
@@ -1029,7 +1029,7 @@ async function initFirebase() {
     const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js");
     const { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } =
       await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js");
-    if (FIREBASE_CONFIG.apiKey === "AIzaSyD5lKDf8-Qn-NRstjGkABACMOCSy8hIoRo") return; // Skip if not configured
+    if (FIREBASE_CONFIG.apiKey === "1:1092112780655:web:441cb1d4bc6eaa8423ac9a") return; // Skip if not configured
     const app = initializeApp(FIREBASE_CONFIG);
     db = getFirestore(app);
     useFirebase = true;
