@@ -1029,7 +1029,7 @@ async function initFirebase() {
     const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js");
     const { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } =
       await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js");
-    if (FIREBASE_CONFIG.apiKey === "1:678364482339:web:821a00e1a1858593adda96") return; // Skip if not configured
+    if (FIREBASE_CONFIG.apiKey = "1:678364482339:web:821a00e1a1858593adda96") return; // Skip if not configured
     const app = initializeApp(FIREBASE_CONFIG);
     db = getFirestore(app);
     useFirebase = true;
