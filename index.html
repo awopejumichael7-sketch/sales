@@ -927,7 +927,7 @@ let currentPage = "dashboard";
 let cart = [];
 let selectedPayMethod = "cash";
 let db = null; // Firebase Firestore reference
-let useFirebase = true;
+let useFirebase = false; // Set to true only after Firebase successfully initializes
 
 /* ============================================================
    LOCAL DATA STORE (localStorage-backed)
@@ -1025,13 +1025,29 @@ function seedData() {
    FIREBASE INIT (optional — graceful fallback)
    ============================================================ */
 async function initFirebase() {
+  // Skip if config looks like it hasn't been filled in
+  if (!FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.startsWith("YOUR_") ||
+      !FIREBASE_CONFIG.projectId || FIREBASE_CONFIG.projectId.startsWith("YOUR_")) {
+    console.log("Firebase not configured — using localStorage mode");
+    return;
+  }
   try {
-    const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js");
-    const { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } =
+    const { initializeApp, getApps, getApp } = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js");
+    const { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy, enableIndexedDbPersistence } =
       await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js");
-    if (FIREBASE_CONFIG.apiKey === "1:678364482339:web:821a00e1a1858593adda96") return; // Skip if not configured
-    const app = initializeApp(FIREBASE_CONFIG);
+    // Avoid "already initialized" error if initFirebase is called more than once
+    const app = getApps().length ? getApp() : initializeApp(FIREBASE_CONFIG);
     db = getFirestore(app);
+    // Enable offline persistence so the app works when the connection drops
+    try {
+      await enableIndexedDbPersistence(db);
+    } catch(pe) {
+      if (pe.code === "failed-precondition") {
+        console.warn("Firestore persistence: multiple tabs open — persistence disabled");
+      } else if (pe.code === "unimplemented") {
+        console.warn("Firestore persistence: browser does not support it");
+      }
+    }
     useFirebase = true;
     console.log("✅ Firebase connected");
     // Expose Firestore methods globally for use
@@ -1039,7 +1055,9 @@ async function initFirebase() {
     window.db = db;
     toast("Firebase connected — cloud sync active", "success", "Cloud Sync");
   } catch(e) {
-    console.log("Firebase not configured — using localStorage mode");
+    console.warn("Firebase init failed — using localStorage mode:", e.message || e);
+    useFirebase = false;
+    toast("Running in offline mode (localStorage)", "warning", "Local Mode");
   }
 }
 
@@ -1063,17 +1081,30 @@ async function fsAdd(colName, data) {
 async function fsUpdate(colName, id, data) {
   const arr = Store.get(colName);
   const idx = arr.findIndex(x => x.id === id);
-  if (idx !== -1) { arr[idx] = { ...arr[idx], ...data, updatedAt: Date.now() }; Store.set(colName, arr); }
-  if (useFirebase && window.fsLib) {
-    try {
-      const arr2 = arr.filter(x=>x.fsId);
-      const item = arr2.find(x=>x.id===id);
-      if (item?.fsId) await window.fsLib.updateDoc(window.fsLib.doc(window.db, colName, item.fsId), data);
-    } catch {}
+  if (idx !== -1) {
+    arr[idx] = { ...arr[idx], ...data, updatedAt: Date.now() };
+    Store.set(colName, arr);
+    // Sync to Firestore if connected and item has a Firestore document ID
+    if (useFirebase && window.fsLib && arr[idx].fsId) {
+      try {
+        await window.fsLib.updateDoc(window.fsLib.doc(window.db, colName, arr[idx].fsId), { ...data, updatedAt: Date.now() });
+      } catch(e) { console.warn("Firestore update failed:", e); }
+    }
   }
 }
 
 async function fsDelete(colName, id) {
+  // Delete from Firestore if connected
+  if (useFirebase && window.fsLib) {
+    try {
+      const arr = Store.get(colName);
+      const item = arr.find(x => x.id === id);
+      if (item?.fsId) {
+        await window.fsLib.deleteDoc(window.fsLib.doc(window.db, colName, item.fsId));
+      }
+    } catch(e) { console.warn("Firestore delete failed:", e); }
+  }
+  // Always delete from localStorage
   const arr = Store.get(colName).filter(x => x.id !== id);
   Store.set(colName, arr);
 }
@@ -1878,14 +1909,19 @@ async function completeSale(sub, disc, tax, total) {
   };
   // Deduct inventory (by base units: qty × qtyPerUnit)
   const products = fsGet("products");
+  const updatePromises = [];
   cart.forEach(ci => {
     const idx = products.findIndex(p=>p.id===ci.id);
     if (idx !== -1) {
       const baseDeduct = ci.qty * (ci.qtyPerUnit || 1);
-      products[idx].qty = Math.max(0, products[idx].qty - baseDeduct);
+      const newQty = Math.max(0, products[idx].qty - baseDeduct);
+      products[idx].qty = newQty;
+      updatePromises.push(fsUpdate("products", ci.id, { qty: newQty }));
     }
   });
+  // Write updated products to localStorage now; Firestore updates run in parallel
   Store.set("products", products);
+  await Promise.all(updatePromises);
   await fsAdd("sales", sale);
   // Add customer if not exists
   if (phone) {
