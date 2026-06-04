@@ -1667,7 +1667,8 @@ function payBadge(m) {
   const map = {
     cash:"badge-green", transfer:"badge-blue", pos:"badge-purple",
     transfer_cash:"badge-blue", pos_cash:"badge-purple",
-    transfer_pos_cash:"badge-yellow"
+    transfer_pos_cash:"badge-yellow",
+    debt_cleared:"badge-orange", advance_collected:"badge-orange"
   };
   return map[m]||"badge-gray";
 }
@@ -1679,7 +1680,9 @@ function payLabel(m, split) {
     pos:"💳 POS",
     transfer_cash:"🏦+💵 Transfer & Cash",
     pos_cash:"💳+💵 POS & Cash",
-    transfer_pos_cash:"🏦+💳+💵 Transfer + POS + Cash"
+    transfer_pos_cash:"🏦+💳+💵 Transfer + POS + Cash",
+    debt_cleared:"💳 Debt Cleared",
+    advance_collected:"⏳ Advance Collected"
   };
   let base = labels[m] || m.toUpperCase();
   if (split && SPLIT_METHODS?.[m]) {
@@ -1910,6 +1913,27 @@ function updateQty(cartKey, delta) {
   filterPosProducts();
 }
 
+function cartUpdateUnit(cartKey, newUnit) {
+  const item = cart.find(c=>(c.cartKey||c.id)===cartKey);
+  if (item && newUnit.trim()) { item.unitType = newUnit.trim(); updateCartTotals(); }
+}
+
+function cartSetQty(cartKey, rawVal) {
+  const item = cart.find(c=>(c.cartKey||c.id)===cartKey);
+  if (!item) return;
+  const newQty = parseInt(rawVal)||1;
+  if (newQty < 1) { removeFromCart(cartKey); return; }
+  const p = fsGet("products").find(x=>x.id===item.id);
+  const otherCommitted = cart.filter(c=>c.id===item.id && (c.cartKey||c.id)!==(item.cartKey||item.id))
+    .reduce((a,c)=>a+c.qty*c.qtyPerUnit, 0);
+  if (otherCommitted + newQty * item.qtyPerUnit > (p?.qty||0)) {
+    toast("Not enough stock","error"); return;
+  }
+  item.qty = newQty;
+  updateCartTotals();
+  filterPosProducts();
+}
+
 function clearCart() { cart = []; renderCart(); filterPosProducts(); }
 
 /* Split-method config: which input rows to show per method */
@@ -2011,12 +2035,23 @@ function renderCart() {
       <div class="cart-item-info">
         <div class="cart-item-name">
           ${escHtml(item.name)}
-          <span class="cart-unit-badge">${escHtml(unitLabel)}</span>
+          <input type="text" value="${escHtml(unitLabel)}"
+            title="Edit unit label"
+            style="display:inline-block;width:72px;padding:2px 6px;font-size:10px;font-family:var(--font-mono);
+                   font-weight:700;color:var(--accent);background:var(--accent-glow);
+                   border:1px solid rgba(240,192,64,0.35);border-radius:99px;text-align:center;cursor:text;"
+            onchange="cartUpdateUnit('${key}',this.value)"
+            oninput="cartUpdateUnit('${key}',this.value)"/>
         </div>
-        <div class="cart-item-price">${fmt(item.price)} / ${escHtml(unitLabel)} ${stockInfo}</div>
+        <div class="cart-item-price">${fmt(item.price)} / unit ${stockInfo}</div>
         <div class="cart-qty">
           <button class="qty-btn" onclick="updateQty('${key}',-1)">−</button>
-          <span class="qty-num">${item.qty}</span>
+          <input type="number" min="1" max="${item.maxQty||9999}" value="${item.qty}"
+            style="width:46px;text-align:center;padding:3px 4px;background:var(--bg-overlay);
+                   border:1px solid var(--border);border-radius:6px;color:var(--text-primary);
+                   font-family:var(--font-mono);font-weight:700;font-size:13px;"
+            onchange="cartSetQty('${key}',this.value)"
+            oninput="cartSetQty('${key}',this.value)"/>
           <button class="qty-btn" onclick="updateQty('${key}',1)">+</button>
         </div>
       </div>
@@ -2583,6 +2618,8 @@ function renderSales() {
         <option value="cash">Cash</option>
         <option value="transfer">Transfer</option>
         <option value="pos">POS</option>
+        <option value="debt_cleared">💳 Debt Cleared</option>
+        <option value="advance_collected">⏳ Advance Collected</option>
       </select>
       <input type="date" class="filter-select" id="sales-date" onchange="filterSales()" value="${today()}"/>
       <button class="btn btn-secondary btn-sm" onclick="document.getElementById('sales-date').value='';filterSales()">Clear Date</button>
@@ -2624,7 +2661,10 @@ function filterSales() {
       </div>
     </td>
     <td class="fw-700 text-accent">${fmt(s.total)}</td>
-    <td><span class="badge ${payBadge(s.payMethod)}">${s.payMethod.toUpperCase()}</span></td>
+    <td><span class="badge ${payBadge(s.payMethod)}">${payLabel(s.payMethod, s.splitPayment)}</span>
+      ${s.source==="debt"?`<div style="font-size:9px;color:var(--orange);margin-top:2px;font-family:var(--font-mono)">FROM DEBT</div>`:""}
+      ${s.source==="advance"?`<div style="font-size:9px;color:var(--blue);margin-top:2px;font-family:var(--font-mono)">FROM ADVANCE</div>`:""}
+    </td>
     <td>${escHtml(s.salesRep)}</td>
     <td class="td-mono">${fmtDateTime(s.date)}</td>
     <td><button class="btn btn-secondary btn-sm btn-icon" onclick='viewSaleReceipt(${JSON.stringify(s).replace(/'/g,"&#39;")})' title="View Receipt">🧾</button></td>
@@ -2809,7 +2849,18 @@ function filterDebts() {
     <td><div class="fw-700">${escHtml(d.customerName)}</div>
     ${d.customerPhone?`<div style="font-size:11px;color:var(--text-muted)">${escHtml(d.customerPhone)}</div>`:""}
     </td>
-    <td style="max-width:200px;font-size:12px">${escHtml(d.goods)}</td>
+    <td style="max-width:220px;font-size:12px">
+      ${(d.items&&d.items.length)
+        ? d.items.map(i=>`<div style="display:flex;align-items:center;gap:4px;margin-bottom:3px">
+            <span>${escHtml(i.emoji||"📦")}</span>
+            <span>${escHtml(i.name)}</span>
+            <span style="font-size:10px;background:var(--accent-glow);color:var(--accent);padding:1px 5px;border-radius:99px;font-family:var(--font-mono)">${escHtml(i.unitType)}</span>
+            <span style="color:var(--text-muted)">×${i.qty}</span>
+            <span style="color:var(--green);font-family:var(--font-mono)">${fmt(i.lineTotal)}</span>
+          </div>`).join("")
+        : escHtml(d.goods)
+      }
+    </td>
     <td class="fw-700">${fmt(d.totalAmount)}</td>
     <td class="text-green">${fmt(d.amountPaid)}</td>
     <td class="fw-700 text-red">${fmt(d.balance)}</td>
@@ -2817,41 +2868,287 @@ function filterDebts() {
     <td><span class="badge ${stBadge[d.status]||"badge-gray"}">${stLabel[d.status]||d.status}</span></td>
     <td><div class="td-actions">
       ${d.status!=="fully_paid"?`<button class="btn btn-success btn-sm" onclick="recordDebtPayment('${d.id}')">+ Pay</button>`:""}
+      <button class="btn btn-secondary btn-icon btn-sm" onclick="openDebtModal('${d.id}')" title="Edit">✏️</button>
       <button class="btn btn-danger btn-icon btn-sm" onclick="deleteDebt('${d.id}')">🗑️</button>
     </div></td>
   </tr>`).join("");
 }
 
-function openDebtModal() {
-  createModal("debt-modal","Add New Debt",`
-    <div class="form-grid">
-      <div class="field"><label>Customer Name *</label><input type="text" id="df-name" placeholder="Full name"/></div>
-      <div class="field"><label>Phone Number</label><input type="text" id="df-phone" placeholder="080XXXXXXXX"/></div>
-      <div class="field form-full"><label>Goods Collected *</label><textarea id="df-goods" placeholder="Rice x3, Oil x1, Sugar x5..."></textarea></div>
-      <div class="field"><label>Total Amount (₦) *</label><input type="number" id="df-total" min="0" placeholder="0"/></div>
-      <div class="field"><label>Amount Paid (₦)</label><input type="number" id="df-paid" min="0" placeholder="0"/></div>
-      <div class="field"><label>Due Date</label><input type="date" id="df-due" value="${futureDate(14)}"/></div>
-    </div>`,
-    `<button class="btn btn-secondary" onclick="closeModal('debt-modal')">Cancel</button>
-     <button class="btn btn-primary" onclick="saveDebt()">Save Debt</button>`
-  );
-  openModal("debt-modal");
+/* ============================================================
+   MULTI-PRODUCT PICKER  (shared by Debt & Advance modals)
+   State: _trackerItems = [ { productId, name, emoji, unitType, qty, unitPrice, lineTotal } ]
+   ============================================================ */
+let _trackerItems = [];
+let _trackerContext = ""; // "debt" | "advance"
+
+function trackerItemsTotal() {
+  return _trackerItems.reduce((s,i)=>s+i.lineTotal,0);
 }
 
-async function saveDebt() {
+function buildTrackerProductSection(context, existingItems=[]) {
+  _trackerContext = context;
+  _trackerItems = existingItems.length
+    ? existingItems.map(i=>({...i}))
+    : [];
+  const totalFieldId = context==="debt" ? "df-total" : "af-total";
+  return `
+    <div style="border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden">
+      <!-- Search row -->
+      <div style="padding:10px 12px;background:var(--bg-elevated);border-bottom:1px solid var(--border);position:relative">
+        <input type="text" id="tp-search-${context}" autocomplete="off"
+          placeholder="🔍 Search and add product..."
+          style="width:100%;background:var(--bg-overlay);border:1px solid var(--border);border-radius:var(--radius-sm);
+                 padding:9px 12px;color:var(--text-primary);font-size:13px;font-family:var(--font-body)"
+          oninput="trackerSearchInput('${context}')"/>
+        <div id="tp-dropdown-${context}"
+          style="position:absolute;left:12px;right:12px;top:calc(100% - 2px);z-index:1000;
+                 background:var(--bg-overlay);border:1px solid var(--accent);border-top:none;
+                 border-radius:0 0 var(--radius-sm) var(--radius-sm);
+                 max-height:220px;overflow-y:auto;display:none;box-shadow:0 8px 24px rgba(0,0,0,0.3)"></div>
+      </div>
+      <!-- Items list -->
+      <div id="tp-items-${context}" style="min-height:48px;padding:8px"></div>
+      <!-- Footer total -->
+      <div style="padding:10px 14px;background:var(--bg-elevated);border-top:1px solid var(--border);
+                  display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:12px;color:var(--text-secondary)">Auto-calculated total</span>
+        <span style="font-family:var(--font-head);font-weight:800;font-size:16px;color:var(--accent)" id="tp-total-${context}">₦0</span>
+      </div>
+    </div>`;
+}
+
+function trackerSearchInput(context) {
+  const val = (document.getElementById(`tp-search-${context}`)?.value||"").toLowerCase();
+  const dd = document.getElementById(`tp-dropdown-${context}`);
+  if (!dd) return;
+  if (!val) { dd.style.display="none"; return; }
+  const products = fsGet("products");
+  const matches = products.filter(p=>p.name.toLowerCase().includes(val)||p.sku.toLowerCase().includes(val)).slice(0,10);
+  if (!matches.length) { dd.style.display="none"; return; }
+  dd.style.display="block";
+  dd.innerHTML = matches.map(p=>{
+    const variants = (p.variants&&p.variants.length) ? p.variants : [{unitType:"Piece",qtyPerUnit:1,price:p.price,cost:p.cost}];
+    const vHtml = variants.map((v,vi)=>`
+      <div onclick="trackerAddProduct('${context}','${p.id}','${escHtml(p.name).replace(/'/g,"\\'")}','${escHtml(p.emoji||"📦")}','${escHtml(v.unitType)}',${v.price},${vi})"
+        style="padding:8px 12px 8px 32px;cursor:pointer;display:flex;justify-content:space-between;font-size:12px;
+               border-bottom:1px solid var(--border);color:var(--text-secondary)"
+        onmouseover="this.style.background='var(--bg-surface)'" onmouseout="this.style.background=''">
+        <span>└ ${escHtml(v.unitType)}${v.qtyPerUnit>1?` (${v.qtyPerUnit} pcs)`:""}</span>
+        <span style="color:var(--accent);font-family:var(--font-mono);font-weight:600">${fmt(v.price)}</span>
+      </div>`).join("");
+    return `<div>
+      <div style="padding:9px 12px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;
+                  background:var(--bg-surface);border-bottom:1px solid var(--border);pointer-events:none">
+        <span>${escHtml(p.emoji||"📦")}</span>
+        <span>${escHtml(p.name)}</span>
+        <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono);margin-left:4px">${escHtml(p.sku)}</span>
+      </div>
+      ${vHtml}
+    </div>`;
+  }).join("");
+}
+
+function trackerAddProduct(context, pid, name, emoji, unitType, unitPrice, _vi) {
+  // Check if same product+unit already in list
+  const existing = _trackerItems.find(i=>i.productId===pid&&i.unitType===unitType);
+  if (existing) {
+    existing.qty++;
+    existing.lineTotal = existing.qty * existing.unitPrice;
+  } else {
+    _trackerItems.push({ productId:pid, name, emoji, unitType, qty:1, unitPrice, lineTotal:unitPrice });
+  }
+  const dd = document.getElementById(`tp-dropdown-${context}`);
+  if (dd) dd.style.display="none";
+  const inp = document.getElementById(`tp-search-${context}`);
+  if (inp) inp.value="";
+  renderTrackerItems(context);
+}
+
+function trackerRemoveItem(context, idx) {
+  _trackerItems.splice(idx,1);
+  renderTrackerItems(context);
+}
+
+function trackerQtyChange(context, idx, delta) {
+  const item = _trackerItems[idx];
+  if (!item) return;
+  const newQty = item.qty + delta;
+  if (newQty < 1) { trackerRemoveItem(context, idx); return; }
+  item.qty = newQty;
+  item.lineTotal = item.qty * item.unitPrice;
+  renderTrackerItems(context);
+}
+
+function trackerUnitEdit(context, idx, newUnit) {
+  const item = _trackerItems[idx];
+  if (!item) return;
+  item.unitType = newUnit || item.unitType;
+  // update totals without full re-render (avoids losing focus)
+  const totalEl = document.getElementById(`tp-total-${context}`);
+  const totalField = document.getElementById(context==="debt"?"df-total":"af-total");
+  const total = trackerItemsTotal();
+  if(totalEl) totalEl.textContent = fmt(total);
+  if(totalField) totalField.value = total;
+}
+
+function trackerSetQty(context, idx, rawVal) {
+  const item = _trackerItems[idx];
+  if (!item) return;
+  const newQty = parseInt(rawVal)||1;
+  if (newQty < 1) { trackerRemoveItem(context, idx); return; }
+  item.qty = newQty;
+  item.lineTotal = item.qty * item.unitPrice;
+  // update line total display without full re-render
+  const rowEl = document.getElementById(`tp-row-${context}-${idx}`);
+  if (rowEl) {
+    const lineTotEl = rowEl.querySelector('.tp-line-total');
+    if (lineTotEl) lineTotEl.textContent = fmt(item.lineTotal);
+  }
+  const totalEl = document.getElementById(`tp-total-${context}`);
+  const totalField = document.getElementById(context==="debt"?"df-total":"af-total");
+  const total = trackerItemsTotal();
+  if(totalEl) totalEl.textContent = fmt(total);
+  if(totalField) totalField.value = total;
+}
+
+function trackerPriceEdit(context, idx, newPrice) {
+  const item = _trackerItems[idx];
+  if (!item) return;
+  item.unitPrice = parseFloat(newPrice)||0;
+  item.lineTotal = item.qty * item.unitPrice;
+  renderTrackerItems(context);
+}
+
+function renderTrackerItems(context) {
+  const el = document.getElementById(`tp-items-${context}`);
+  const totalEl = document.getElementById(`tp-total-${context}`);
+  const totalField = document.getElementById(context==="debt"?"df-total":"af-total");
+  if (!el) return;
+  if (!_trackerItems.length) {
+    el.innerHTML=`<div style="text-align:center;padding:14px;color:var(--text-muted);font-size:12px">No products added yet. Search above to add.</div>`;
+    if(totalEl) totalEl.textContent="₦0";
+    if(totalField) totalField.value="";
+    return;
+  }
+  el.innerHTML = _trackerItems.map((item,idx)=>`
+    <div style="display:grid;grid-template-columns:1fr auto auto auto auto auto;gap:6px;align-items:center;
+                padding:8px 6px;border-bottom:1px solid var(--border);font-size:13px" id="tp-row-${context}-${idx}">
+      <div>
+        <span style="font-size:16px">${escHtml(item.emoji)}</span>
+        <span style="font-weight:600;margin-left:6px">${escHtml(item.name)}</span>
+        <input type="text" value="${escHtml(item.unitType)}" title="Edit unit label"
+          style="display:inline-block;width:70px;margin-left:6px;padding:2px 6px;font-size:10px;
+                 font-family:var(--font-mono);font-weight:700;color:var(--accent);
+                 background:var(--accent-glow);border:1px solid rgba(240,192,64,0.35);
+                 border-radius:99px;text-align:center;"
+          onchange="trackerUnitEdit('${context}',${idx},this.value)"
+          oninput="trackerUnitEdit('${context}',${idx},this.value)"/>
+      </div>
+      <div style="display:flex;align-items:center;gap:4px">
+        <button onclick="trackerQtyChange('${context}',${idx},-1)"
+          style="width:24px;height:24px;border-radius:4px;border:1px solid var(--border);
+                 background:var(--bg-overlay);color:var(--text-primary);cursor:pointer;font-size:14px;line-height:1">−</button>
+        <input type="number" min="1" value="${item.qty}"
+          style="width:46px;text-align:center;padding:3px 4px;background:var(--bg-overlay);
+                 border:1px solid var(--border);border-radius:4px;color:var(--text-primary);
+                 font-family:var(--font-mono);font-weight:700;font-size:13px;"
+          onchange="trackerSetQty('${context}',${idx},this.value)"
+          oninput="trackerSetQty('${context}',${idx},this.value)"/>
+        <button onclick="trackerQtyChange('${context}',${idx},1)"
+          style="width:24px;height:24px;border-radius:4px;border:1px solid var(--border);
+                 background:var(--bg-overlay);color:var(--text-primary);cursor:pointer;font-size:14px;line-height:1">+</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:4px">
+        <span style="font-size:11px;color:var(--text-muted)">@</span>
+        <input type="number" value="${item.unitPrice}" min="0"
+          style="width:90px;padding:4px 6px;background:var(--bg-overlay);border:1px solid var(--border);
+                 border-radius:4px;color:var(--text-primary);font-size:12px;font-family:var(--font-mono);text-align:right"
+          onchange="trackerPriceEdit('${context}',${idx},this.value)" oninput="trackerPriceEdit('${context}',${idx},this.value)"/>
+      </div>
+      <div class="tp-line-total" style="font-family:var(--font-mono);font-weight:700;color:var(--accent);min-width:80px;text-align:right">${fmt(item.lineTotal)}</div>
+      <button onclick="trackerRemoveItem('${context}',${idx})"
+        style="width:26px;height:26px;border-radius:4px;border:1px solid rgba(255,95,109,0.3);
+               background:var(--red-dim);color:var(--red);cursor:pointer;font-size:14px;line-height:1">✕</button>
+    </div>`).join("");
+  const total = trackerItemsTotal();
+  if(totalEl) totalEl.textContent = fmt(total);
+  if(totalField) totalField.value = total;
+  // close dropdown if still open
+  const dd = document.getElementById(`tp-dropdown-${context}`);
+  if(dd) dd.style.display="none";
+}
+
+function getTrackerItemsSummary() {
+  return _trackerItems.map(i=>`${i.name} (${i.unitType}) ×${i.qty}`).join(", ");
+}
+
+// Close tracker dropdown when clicking outside
+document.addEventListener("click", function(e){
+  ["debt","advance"].forEach(ctx=>{
+    const dd = document.getElementById(`tp-dropdown-${ctx}`);
+    const inp = document.getElementById(`tp-search-${ctx}`);
+    if(dd && !dd.contains(e.target) && e.target!==inp) dd.style.display="none";
+  });
+});
+
+function openDebtModal(editId="") {
+  const existing = editId ? fsGet("debts").find(d=>d.id===editId) : null;
+  const title = existing ? "Edit Debt Record" : "Add New Debt";
+  const saveBtn = existing
+    ? `<button class="btn btn-primary" onclick="saveDebt('${editId}')">Update Debt</button>`
+    : `<button class="btn btn-primary" onclick="saveDebt()">Save Debt</button>`;
+  // Parse existing items — support both new array format and old string format
+  const existingItems = existing?.items?.length
+    ? existing.items
+    : (existing?.goods ? [{ productId:"custom", name:existing.goods, emoji:"📦", unitType:"Item", qty:1, unitPrice:existing.totalAmount||0, lineTotal:existing.totalAmount||0 }] : []);
+  createModal("debt-modal", title, `
+    <div class="form-grid">
+      <div class="field"><label>Customer Name *</label><input type="text" id="df-name" placeholder="Full name" value="${escHtml(existing?.customerName||"")}"/></div>
+      <div class="field"><label>Phone Number</label><input type="text" id="df-phone" placeholder="080XXXXXXXX" value="${escHtml(existing?.customerPhone||"")}"/></div>
+      <div class="field form-full">
+        <label style="margin-bottom:8px;display:block">Products / Goods Collected * <span style="font-size:11px;color:var(--text-muted);font-weight:400">(search to add, pick unit, adjust qty & price)</span></label>
+        ${buildTrackerProductSection("debt", existingItems)}
+      </div>
+      <div class="field"><label>Total Amount (₦) *</label><input type="number" id="df-total" min="0" placeholder="Auto-calculated from products" value="${existing?.totalAmount||""}" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);padding:10px 12px;width:100%"/></div>
+      <div class="field"><label>Amount Paid (₦)</label><input type="number" id="df-paid" min="0" placeholder="0" value="${existing?.amountPaid||""}"/></div>
+      <div class="field"><label>Due Date</label><input type="date" id="df-due" value="${existing?.dueDate||futureDate(14)}"/></div>
+    </div>`,
+    `<button class="btn btn-secondary" onclick="closeModal('debt-modal')">Cancel</button>${saveBtn}`,
+    "modal-lg"
+  );
+  openModal("debt-modal");
+  renderTrackerItems("debt");
+}
+
+async function saveDebt(editId="") {
   const name = document.getElementById("df-name")?.value?.trim();
-  const goods = document.getElementById("df-goods")?.value?.trim();
   const total = parseFloat(document.getElementById("df-total")?.value)||0;
-  if (!name || !goods || !total) { toast("Name, goods and amount required","error"); return; }
+  if (!name) { toast("Customer name required","error"); return; }
+  if (!_trackerItems.length) { toast("Add at least one product","error"); return; }
+  if (!total) { toast("Total amount required","error"); return; }
+  const goods = getTrackerItemsSummary();
+  const itemsToSave = _trackerItems.map(i=>({...i}));
   const paid = parseFloat(document.getElementById("df-paid")?.value)||0;
   const balance = total - paid;
   const status = balance<=0?"fully_paid":paid>0?"partially_paid":"unpaid";
-  await fsAdd("debts",{ customerName:name, customerPhone:document.getElementById("df-phone")?.value?.trim(),
-    goods, totalAmount:total, amountPaid:paid, balance:Math.max(0,balance),
-    dueDate:document.getElementById("df-due")?.value, status,
-    payHistory:paid>0?[{amount:paid,date:Date.now(),note:"Initial payment"}]:[]
-  });
-  toast("Debt recorded","success"); closeModal("debt-modal"); renderDebts();
+  if (editId) {
+    const existing = fsGet("debts").find(d=>d.id===editId);
+    await fsUpdate("debts",editId,{ customerName:name, customerPhone:document.getElementById("df-phone")?.value?.trim(),
+      goods, items:itemsToSave, totalAmount:total, amountPaid:paid, balance:Math.max(0,balance),
+      dueDate:document.getElementById("df-due")?.value, status,
+      payHistory:existing?.payHistory||[]
+    });
+    if (balance<=0) await autoMoveDebtToSales(editId);
+    toast("Debt updated","success");
+  } else {
+    await fsAdd("debts",{ customerName:name, customerPhone:document.getElementById("df-phone")?.value?.trim(),
+      goods, items:itemsToSave, totalAmount:total, amountPaid:paid, balance:Math.max(0,balance),
+      dueDate:document.getElementById("df-due")?.value, status,
+      payHistory:paid>0?[{amount:paid,date:Date.now(),note:"Initial payment"}]:[]
+    });
+    toast("Debt recorded","success");
+  }
+  closeModal("debt-modal"); renderDebts();
 }
 
 function recordDebtPayment(did) {
@@ -2880,8 +3177,29 @@ async function confirmDebtPayment(did, maxBal) {
   const status = newBal<=0?"fully_paid":newPaid>0?"partially_paid":"unpaid";
   const payHistory = [...(debt.payHistory||[]), { amount, date:Date.now(), note:note||"Payment" }];
   await fsUpdate("debts",did,{ amountPaid:newPaid, balance:newBal, status, payHistory, completedAt:newBal<=0?Date.now():null });
-  toast(newBal<=0?"Debt fully paid! 🎉":`Payment of ${fmt(amount)} recorded`,"success");
+  if (newBal<=0) {
+    await autoMoveDebtToSales(did);
+    toast("Debt fully paid! Moving to Sales Report 🎉","success");
+  } else {
+    toast(`Payment of ${fmt(amount)} recorded`,"success");
+  }
   closeModal("pay-modal"); renderDebts();
+}
+
+async function autoMoveDebtToSales(did) {
+  const debt = fsGet("debts").find(d=>d.id===did);
+  if (!debt) return;
+  const saleItems = (debt.items&&debt.items.length)
+    ? debt.items.map(i=>({ id:i.productId||"debt-"+did, name:i.name, qty:i.qty, price:i.unitPrice, cost:0, unitType:i.unitType||"Item", qtyPerUnit:1 }))
+    : [{ id:"debt-"+did, name:debt.goods, qty:1, price:debt.totalAmount, cost:0, unitType:"Item", qtyPerUnit:1 }];
+  await fsAdd("sales", {
+    txId: txnId(), date: Date.now(),
+    customer: { name: debt.customerName, phone: debt.customerPhone||"" },
+    items: saleItems,
+    subtotal: debt.totalAmount, discount:0, tax:0, total:debt.totalAmount,
+    payMethod: "debt_cleared", salesRep: currentUser?.name||"System",
+    note: "Debt fully paid — auto-moved to Sales", source: "debt", status:"completed"
+  });
 }
 
 async function deleteDebt(did) {
@@ -2934,7 +3252,17 @@ function filterAdvance() {
     <td><div class="fw-700">${escHtml(a.customerName)}</div>
     ${a.customerPhone?`<div style="font-size:11px;color:var(--text-muted)">${escHtml(a.customerPhone)}</div>`:""}
     </td>
-    <td style="font-size:12px">${escHtml(a.product)}</td>
+    <td style="font-size:12px">
+      ${(a.items&&a.items.length)
+        ? a.items.map(i=>`<div style="display:flex;align-items:center;gap:4px;margin-bottom:3px">
+            <span>${escHtml(i.emoji||"📦")}</span>
+            <span>${escHtml(i.name)}</span>
+            <span style="font-size:10px;background:var(--accent-glow);color:var(--accent);padding:1px 5px;border-radius:99px;font-family:var(--font-mono)">${escHtml(i.unitType)}</span>
+            <span style="color:var(--text-muted)">×${i.qty}</span>
+          </div>`).join("")
+        : escHtml(a.product)
+      }
+    </td>
     <td class="text-green fw-700">${fmt(a.amountPaid)}</td>
     <td>${fmt(a.totalCost)}</td>
     <td class="text-accent fw-700">${fmt(a.balance)}</td>
@@ -2943,46 +3271,88 @@ function filterAdvance() {
     ${a.collectedAt?`<div style="font-size:10px;color:var(--text-muted);margin-top:2px">Collected: ${fmtDate(a.collectedAt)}</div>`:""}</td>
     <td><div class="td-actions">
       ${a.status==="pending"?`<button class="btn btn-success btn-sm" onclick="markAdvanceCollected('${a.id}')">✓ Collected</button>`:""}
+      <button class="btn btn-secondary btn-icon btn-sm" onclick="openAdvanceModal('${a.id}')" title="Edit">✏️</button>
       <button class="btn btn-danger btn-icon btn-sm" onclick="deleteAdvance('${a.id}')">🗑️</button>
     </div></td>
   </tr>`).join("");
 }
 
-function openAdvanceModal() {
-  createModal("adv-modal","Add Advance Payment",`
+function openAdvanceModal(editId="") {
+  const existing = editId ? fsGet("advance").find(a=>a.id===editId) : null;
+  const title = existing ? "Edit Advance Payment" : "Add Advance Payment";
+  const saveBtn = existing
+    ? `<button class="btn btn-primary" onclick="saveAdvance('${editId}')">Update Advance</button>`
+    : `<button class="btn btn-primary" onclick="saveAdvance()">Save Advance</button>`;
+  const existingItems = existing?.items?.length
+    ? existing.items
+    : (existing?.product ? [{ productId:"custom", name:existing.product, emoji:"📦", unitType:"Item", qty:1, unitPrice:existing.totalCost||0, lineTotal:existing.totalCost||0 }] : []);
+  createModal("adv-modal", title, `
     <div class="form-grid">
-      <div class="field"><label>Customer Name *</label><input type="text" id="af-name" placeholder="Full name"/></div>
-      <div class="field"><label>Phone Number</label><input type="text" id="af-phone" placeholder="080XXXXXXXX"/></div>
-      <div class="field form-full"><label>Product(s) Reserved *</label><input type="text" id="af-product" placeholder="e.g. Premium Rice x5, Milo x2"/></div>
-      <div class="field"><label>Total Cost (₦) *</label><input type="number" id="af-total" min="0" placeholder="0"/></div>
-      <div class="field"><label>Amount Paid (₦) *</label><input type="number" id="af-paid" min="0" placeholder="0"/></div>
-      <div class="field"><label>Expected Pickup Date</label><input type="date" id="af-pickup" value="${futureDate(7)}"/></div>
-      <div class="field form-full"><label>Notes</label><textarea id="af-notes" placeholder="Any additional notes..."></textarea></div>
+      <div class="field"><label>Customer Name *</label><input type="text" id="af-name" placeholder="Full name" value="${escHtml(existing?.customerName||"")}"/></div>
+      <div class="field"><label>Phone Number</label><input type="text" id="af-phone" placeholder="080XXXXXXXX" value="${escHtml(existing?.customerPhone||"")}"/></div>
+      <div class="field form-full">
+        <label style="margin-bottom:8px;display:block">Products Reserved * <span style="font-size:11px;color:var(--text-muted);font-weight:400">(search to add, pick unit, adjust qty & price)</span></label>
+        ${buildTrackerProductSection("advance", existingItems)}
+      </div>
+      <div class="field"><label>Total Cost (₦) *</label><input type="number" id="af-total" min="0" placeholder="Auto-calculated from products" value="${existing?.totalCost||""}" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);padding:10px 12px;width:100%"/></div>
+      <div class="field"><label>Amount Paid (₦) *</label><input type="number" id="af-paid" min="0" placeholder="0" value="${existing?.amountPaid||""}"/></div>
+      <div class="field"><label>Expected Pickup Date</label><input type="date" id="af-pickup" value="${existing?.expectedPickup||futureDate(7)}"/></div>
+      <div class="field form-full"><label>Notes</label><textarea id="af-notes" placeholder="Any additional notes...">${escHtml(existing?.notes||"")}</textarea></div>
     </div>`,
-    `<button class="btn btn-secondary" onclick="closeModal('adv-modal')">Cancel</button>
-     <button class="btn btn-primary" onclick="saveAdvance()">Save Advance</button>`
+    `<button class="btn btn-secondary" onclick="closeModal('adv-modal')">Cancel</button>${saveBtn}`,
+    "modal-lg"
   );
   openModal("adv-modal");
+  renderTrackerItems("advance");
 }
 
-async function saveAdvance() {
+async function saveAdvance(editId="") {
   const name = document.getElementById("af-name")?.value?.trim();
-  const product = document.getElementById("af-product")?.value?.trim();
   const total = parseFloat(document.getElementById("af-total")?.value)||0;
   const paid = parseFloat(document.getElementById("af-paid")?.value)||0;
-  if (!name || !product || !total) { toast("Name, product and amount required","error"); return; }
-  await fsAdd("advance",{ customerName:name, customerPhone:document.getElementById("af-phone")?.value?.trim(),
-    product, totalCost:total, amountPaid:paid, balance:Math.max(0,total-paid),
-    expectedPickup:document.getElementById("af-pickup")?.value,
-    notes:document.getElementById("af-notes")?.value?.trim(),
-    status:"pending"
-  });
-  toast("Advance payment recorded","success"); closeModal("adv-modal"); renderAdvance();
+  if (!name) { toast("Customer name required","error"); return; }
+  if (!_trackerItems.length) { toast("Add at least one product","error"); return; }
+  if (!total) { toast("Total amount required","error"); return; }
+  const product = getTrackerItemsSummary();
+  const itemsToSave = _trackerItems.map(i=>({...i}));
+  const balance = Math.max(0, total - paid);
+  if (editId) {
+    await fsUpdate("advance",editId,{ customerName:name, customerPhone:document.getElementById("af-phone")?.value?.trim(),
+      product, items:itemsToSave, totalCost:total, amountPaid:paid, balance,
+      expectedPickup:document.getElementById("af-pickup")?.value,
+      notes:document.getElementById("af-notes")?.value?.trim()
+    });
+    toast("Advance payment updated","success");
+  } else {
+    await fsAdd("advance",{ customerName:name, customerPhone:document.getElementById("af-phone")?.value?.trim(),
+      product, items:itemsToSave, totalCost:total, amountPaid:paid, balance,
+      expectedPickup:document.getElementById("af-pickup")?.value,
+      notes:document.getElementById("af-notes")?.value?.trim(),
+      status:"pending"
+    });
+    toast("Advance payment recorded","success");
+  }
+  closeModal("adv-modal"); renderAdvance();
 }
 
 async function markAdvanceCollected(aid) {
   await fsUpdate("advance",aid,{ status:"collected", collectedAt:Date.now() });
-  toast("Marked as collected! ✅","success"); renderAdvance();
+  const adv = fsGet("advance").find(a=>a.id===aid);
+  if (adv) {
+    const saleItems = (adv.items&&adv.items.length)
+      ? adv.items.map(i=>({ id:i.productId||"adv-"+aid, name:i.name, qty:i.qty, price:i.unitPrice, cost:0, unitType:i.unitType||"Item", qtyPerUnit:1 }))
+      : [{ id:"adv-"+aid, name:adv.product, qty:1, price:adv.totalCost, cost:0, unitType:"Item", qtyPerUnit:1 }];
+    await fsAdd("sales",{
+      txId: txnId(), date: Date.now(),
+      customer: { name: adv.customerName, phone: adv.customerPhone||"" },
+      items: saleItems,
+      subtotal: adv.totalCost, discount:0, tax:0, total:adv.totalCost,
+      payMethod:"advance_collected", salesRep: currentUser?.name||"System",
+      note:"Advance payment collected — auto-moved to Sales",
+      source:"advance", status:"completed"
+    });
+  }
+  toast("Marked as collected & added to Sales Report! ✅","success"); renderAdvance();
 }
 
 async function deleteAdvance(aid) {
