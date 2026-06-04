@@ -2855,8 +2855,6 @@ function filterDebts() {
             <span>${escHtml(i.emoji||"📦")}</span>
             <span>${escHtml(i.name)}</span>
             <span style="font-size:10px;background:var(--accent-glow);color:var(--accent);padding:1px 5px;border-radius:99px;font-family:var(--font-mono)">${escHtml(i.unitType)}</span>
-            <span style="color:var(--text-muted)">×${i.qty}</span>
-            <span style="color:var(--green);font-family:var(--font-mono)">${fmt(i.lineTotal)}</span>
           </div>`).join("")
         : escHtml(d.goods)
       }
@@ -3120,6 +3118,83 @@ function openDebtModal(editId="") {
   renderTrackerItems("debt");
 }
 
+async function _deductItemsFromStock(items, refLabel, logType) {
+  const products = fsGet("products");
+  for (const ci of items) {
+    if (!ci.productId || ci.productId === "custom") continue;
+    const idx = products.findIndex(p => p.id === ci.productId);
+    if (idx === -1) continue;
+    const baseDeduct = ci.qty * (ci.qtyPerUnit || 1);
+    const newQty = Math.max(0, products[idx].qty - baseDeduct);
+    products[idx].qty = newQty;
+    await fsUpdate("products", ci.productId, { qty: newQty });
+    await fsAdd("inventoryLogs", {
+      productId: ci.productId, productName: ci.name,
+      type: logType, qty: -baseDeduct,
+      unitType: ci.unitType || "Item", unitsSold: ci.qty,
+      ref: refLabel, date: Date.now()
+    });
+  }
+  Store.set("products", products);
+}
+
+async function _restoreItemsToStock(items, refLabel, logType) {
+  const products = fsGet("products");
+  for (const ci of items) {
+    if (!ci.productId || ci.productId === "custom") continue;
+    const idx = products.findIndex(p => p.id === ci.productId);
+    if (idx === -1) continue;
+    const baseRestore = ci.qty * (ci.qtyPerUnit || 1);
+    products[idx].qty += baseRestore;
+    await fsUpdate("products", ci.productId, { qty: products[idx].qty });
+    await fsAdd("inventoryLogs", {
+      productId: ci.productId, productName: ci.name,
+      type: logType, qty: +baseRestore,
+      unitType: ci.unitType || "Item", unitsSold: ci.qty,
+      ref: refLabel, date: Date.now()
+    });
+  }
+  Store.set("products", products);
+}
+
+async function _reconcileStockDiff(oldItems, newItems, refLabel) {
+  // Build maps keyed by productId+unitType
+  const oldMap = {};
+  (oldItems||[]).forEach(i => {
+    if (!i.productId || i.productId === "custom") return;
+    const key = i.productId + "|" + i.unitType;
+    oldMap[key] = (oldMap[key] || 0) + (i.qty * (i.qtyPerUnit || 1));
+  });
+  const newMap = {};
+  (newItems||[]).forEach(i => {
+    if (!i.productId || i.productId === "custom") return;
+    const key = i.productId + "|" + i.unitType;
+    newMap[key] = { qty: (newMap[key]?.qty || 0) + (i.qty * (i.qtyPerUnit || 1)), item: i };
+  });
+  const products = fsGet("products");
+  const allKeys = new Set([...Object.keys(oldMap), ...Object.keys(newMap)]);
+  for (const key of allKeys) {
+    const oldBase = oldMap[key] || 0;
+    const newBase = newMap[key]?.qty || 0;
+    const diff = newBase - oldBase; // positive = need to deduct more; negative = restore
+    if (diff === 0) continue;
+    const item = newMap[key]?.item || (oldItems||[]).find(i => (i.productId + "|" + i.unitType) === key);
+    if (!item) continue;
+    const idx = products.findIndex(p => p.id === item.productId);
+    if (idx === -1) continue;
+    products[idx].qty = Math.max(0, products[idx].qty - diff);
+    await fsUpdate("products", item.productId, { qty: products[idx].qty });
+    await fsAdd("inventoryLogs", {
+      productId: item.productId, productName: item.name,
+      type: diff > 0 ? "debt_deduct" : "debt_restore",
+      qty: -diff,
+      unitType: item.unitType || "Item",
+      ref: refLabel + " (edit)", date: Date.now()
+    });
+  }
+  Store.set("products", products);
+}
+
 async function saveDebt(editId="") {
   const name = document.getElementById("df-name")?.value?.trim();
   const total = parseFloat(document.getElementById("df-total")?.value)||0;
@@ -3133,6 +3208,8 @@ async function saveDebt(editId="") {
   const status = balance<=0?"fully_paid":paid>0?"partially_paid":"unpaid";
   if (editId) {
     const existing = fsGet("debts").find(d=>d.id===editId);
+    // Reconcile stock difference between old and new items
+    await _reconcileStockDiff(existing?.items||[], itemsToSave, `DEBT-${editId.slice(-6).toUpperCase()}`);
     await fsUpdate("debts",editId,{ customerName:name, customerPhone:document.getElementById("df-phone")?.value?.trim(),
       goods, items:itemsToSave, totalAmount:total, amountPaid:paid, balance:Math.max(0,balance),
       dueDate:document.getElementById("df-due")?.value, status,
@@ -3141,12 +3218,14 @@ async function saveDebt(editId="") {
     if (balance<=0) await autoMoveDebtToSales(editId);
     toast("Debt updated","success");
   } else {
+    // New debt — deduct from stock immediately
+    await _deductItemsFromStock(itemsToSave, "New Debt", "debt_deduct");
     await fsAdd("debts",{ customerName:name, customerPhone:document.getElementById("df-phone")?.value?.trim(),
       goods, items:itemsToSave, totalAmount:total, amountPaid:paid, balance:Math.max(0,balance),
       dueDate:document.getElementById("df-due")?.value, status,
       payHistory:paid>0?[{amount:paid,date:Date.now(),note:"Initial payment"}]:[]
     });
-    toast("Debt recorded","success");
+    toast("Debt recorded — stock deducted","success");
   }
   closeModal("debt-modal"); renderDebts();
 }
@@ -3203,8 +3282,16 @@ async function autoMoveDebtToSales(did) {
 }
 
 async function deleteDebt(did) {
-  if (!confirm("Delete this debt record?")) return;
-  await fsDelete("debts",did); toast("Deleted","info"); renderDebts();
+  if (!confirm("Delete this debt record? Stock will be restored for any items that were deducted.")) return;
+  const debt = fsGet("debts").find(d=>d.id===did);
+  // Restore stock for items that were deducted when the debt was created/updated
+  if (debt?.items?.length) {
+    await _restoreItemsToStock(debt.items, `DEBT-DEL-${did.slice(-6).toUpperCase()}`, "debt_restore");
+  }
+  await fsDelete("debts",did);
+  toast("Debt deleted — stock restored","info");
+  renderDebts();
+  updateNavBadges();
 }
 
 /* ============================================================
@@ -3258,7 +3345,6 @@ function filterAdvance() {
             <span>${escHtml(i.emoji||"📦")}</span>
             <span>${escHtml(i.name)}</span>
             <span style="font-size:10px;background:var(--accent-glow);color:var(--accent);padding:1px 5px;border-radius:99px;font-family:var(--font-mono)">${escHtml(i.unitType)}</span>
-            <span style="color:var(--text-muted)">×${i.qty}</span>
           </div>`).join("")
         : escHtml(a.product)
       }
@@ -3317,47 +3403,258 @@ async function saveAdvance(editId="") {
   const itemsToSave = _trackerItems.map(i=>({...i}));
   const balance = Math.max(0, total - paid);
   if (editId) {
+    const existing = fsGet("advance").find(a=>a.id===editId);
+    // Only reconcile stock for pending advances (collected ones already deducted at collection time)
+    if (existing?.status === "pending") {
+      await _reconcileStockDiff(existing?.items||[], itemsToSave, `ADV-${editId.slice(-6).toUpperCase()}`);
+    }
     await fsUpdate("advance",editId,{ customerName:name, customerPhone:document.getElementById("af-phone")?.value?.trim(),
       product, items:itemsToSave, totalCost:total, amountPaid:paid, balance,
       expectedPickup:document.getElementById("af-pickup")?.value,
       notes:document.getElementById("af-notes")?.value?.trim()
     });
-    toast("Advance payment updated","success");
+    toast("Advance payment updated — stock adjusted","success");
   } else {
+    // New advance — deduct reserved items from stock immediately
+    await _deductItemsFromStock(itemsToSave, "New Advance", "advance_reserve");
     await fsAdd("advance",{ customerName:name, customerPhone:document.getElementById("af-phone")?.value?.trim(),
       product, items:itemsToSave, totalCost:total, amountPaid:paid, balance,
       expectedPickup:document.getElementById("af-pickup")?.value,
       notes:document.getElementById("af-notes")?.value?.trim(),
       status:"pending"
     });
-    toast("Advance payment recorded","success");
+    toast("Advance payment recorded — stock reserved","success");
   }
   closeModal("adv-modal"); renderAdvance();
+  updateNavBadges();
 }
 
-async function markAdvanceCollected(aid) {
-  await fsUpdate("advance",aid,{ status:"collected", collectedAt:Date.now() });
+function markAdvanceCollected(aid) {
   const adv = fsGet("advance").find(a=>a.id===aid);
-  if (adv) {
-    const saleItems = (adv.items&&adv.items.length)
-      ? adv.items.map(i=>({ id:i.productId||"adv-"+aid, name:i.name, qty:i.qty, price:i.unitPrice, cost:0, unitType:i.unitType||"Item", qtyPerUnit:1 }))
-      : [{ id:"adv-"+aid, name:adv.product, qty:1, price:adv.totalCost, cost:0, unitType:"Item", qtyPerUnit:1 }];
-    await fsAdd("sales",{
-      txId: txnId(), date: Date.now(),
-      customer: { name: adv.customerName, phone: adv.customerPhone||"" },
-      items: saleItems,
-      subtotal: adv.totalCost, discount:0, tax:0, total:adv.totalCost,
-      payMethod:"advance_collected", salesRep: currentUser?.name||"System",
-      note:"Advance payment collected — auto-moved to Sales",
-      source:"advance", status:"completed"
-    });
+  if (!adv) return;
+
+  const items = (adv.items&&adv.items.length)
+    ? adv.items
+    : [{ productId:"custom", name:adv.product||"Product", emoji:"📦", unitType:"Item", qty:1, unitPrice:adv.totalCost||0, lineTotal:adv.totalCost||0 }];
+
+  // Build per-item qty input rows
+  const rowsHtml = items.map((item,idx)=>`
+    <div style="display:grid;grid-template-columns:1fr 90px 90px;gap:10px;align-items:center;
+                padding:10px 0;border-bottom:1px solid var(--border)" id="coll-row-${idx}">
+      <div>
+        <span style="font-size:16px">${escHtml(item.emoji||"📦")}</span>
+        <span style="font-weight:600;margin-left:6px">${escHtml(item.name)}</span>
+        <span style="font-size:10px;background:var(--accent-glow);color:var(--accent);padding:1px 6px;
+              border-radius:99px;font-family:var(--font-mono);margin-left:6px">${escHtml(item.unitType)}</span>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:3px">Paid for: <strong style="color:var(--text-primary)">${item.qty}</strong></div>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;text-align:center">Collected</div>
+        <input type="number" id="coll-qty-${idx}" min="0" value="${item.qty}"
+          style="width:100%;text-align:center;padding:6px;background:var(--bg-overlay);
+                 border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);
+                 font-family:var(--font-mono);font-weight:700;font-size:14px"
+          oninput="updateCollectionSummary(${idx},${item.qty},${item.unitPrice})"/>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--text-muted);margin-bottom:3px;text-align:center">Remaining</div>
+        <input type="number" id="coll-rem-${idx}" min="0" value="0"
+          placeholder="0"
+          style="width:100%;text-align:center;padding:6px;background:var(--bg-overlay);
+                 border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);
+                 font-family:var(--font-mono);font-size:13px"/>
+      </div>
+    </div>`).join("");
+
+  createModal("adv-collect-modal","✓ Record Collection",`
+    <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);
+                padding:14px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
+        <span class="text-secondary">Customer:</span>
+        <span class="fw-700">${escHtml(adv.customerName)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px">
+        <span class="text-secondary">Amount Paid:</span>
+        <span class="fw-700 text-green">${fmt(adv.amountPaid)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:13px">
+        <span class="text-secondary">Total Cost:</span>
+        <span class="fw-700 text-accent">${fmt(adv.totalCost)}</span>
+      </div>
+    </div>
+    <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;
+                color:var(--text-secondary);margin-bottom:10px">Items — Enter Quantities Collected</div>
+    ${rowsHtml}
+    <div id="coll-summary" style="margin-top:14px;padding:12px 14px;border-radius:var(--radius-sm);
+         background:var(--bg-elevated);border:1px solid var(--border);font-size:12px;display:none"></div>
+    <div style="margin-top:12px;padding:10px 12px;background:var(--blue-dim);border:1px solid rgba(79,163,255,0.2);
+                border-radius:var(--radius-sm);font-size:11px;color:var(--blue)">
+      💡 If customer collects <strong>more</strong> than paid for, the extra will be added to their debt automatically.
+      If they collect <strong>less</strong>, enter remaining qty in the "Remaining" column for them to pick up later.
+    </div>`,
+    `<button class="btn btn-secondary" onclick="closeModal('adv-collect-modal')">Cancel</button>
+     <button class="btn btn-success" onclick="confirmAdvanceCollection('${aid}',${JSON.stringify(items).replace(/"/g,'&quot;')})">✓ Confirm Collection</button>`,
+    "modal-lg"
+  );
+  openModal("adv-collect-modal");
+}
+
+function updateCollectionSummary(idx, paidQty, unitPrice) {
+  const collectedQty = parseFloat(document.getElementById(`coll-qty-${idx}`)?.value)||0;
+  const diff = collectedQty - paidQty;
+  const remEl = document.getElementById(`coll-rem-${idx}`);
+  // Auto-suggest remaining if they collect less
+  if (diff < 0 && remEl) { remEl.value = Math.abs(diff); }
+  if (diff >= 0 && remEl) { remEl.value = 0; }
+}
+
+async function confirmAdvanceCollection(aid, items) {
+  const adv = fsGet("advance").find(a=>a.id===aid);
+  if (!adv) return;
+
+  const collectedItems = [];
+  const remainingItems = [];
+  let extraCost = 0;
+  let collectedTotalValue = 0;
+
+  items.forEach((item,idx) => {
+    const collQty = parseFloat(document.getElementById(`coll-qty-${idx}`)?.value)||0;
+    const remQty  = parseFloat(document.getElementById(`coll-rem-${idx}`)?.value)||0;
+    const paidQty = item.qty;
+
+    if (collQty > 0) {
+      collectedItems.push({ ...item, qty: collQty, lineTotal: collQty * item.unitPrice });
+      collectedTotalValue += collQty * item.unitPrice;
+    }
+
+    // Over-collected: customer took more than paid for
+    if (collQty > paidQty) {
+      const overQty = collQty - paidQty;
+      extraCost += overQty * item.unitPrice;
+    }
+
+    // Under-collected with a remaining amount specified
+    if (remQty > 0) {
+      remainingItems.push({ ...item, qty: remQty, lineTotal: remQty * item.unitPrice });
+    }
+  });
+
+  if (!collectedItems.length) { toast("Enter at least one collected quantity","error"); return; }
+
+  // 1. Stock was already deducted when the advance was created (reserved).
+  //    At collection time we only need to handle differences:
+  //    - Over-collected (collQty > paidQty): deduct the EXTRA units
+  //    - Under-collected / remaining items:  restore the un-collected units back to stock
+  const products = fsGet("products");
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const collQty = parseFloat(document.getElementById(`coll-qty-${i}`)?.value)||0;
+    const paidQty = item.qty;
+    const idx = products.findIndex(p=>p.id===item.productId);
+    if (idx === -1) continue;
+
+    if (collQty > paidQty) {
+      // Extra units taken — deduct the overage
+      const extraBase = (collQty - paidQty) * (item.qtyPerUnit||1);
+      products[idx].qty = Math.max(0, products[idx].qty - extraBase);
+      await fsUpdate("products", item.productId, { qty: products[idx].qty });
+      await fsAdd("inventoryLogs",{
+        productId:item.productId, productName:item.name,
+        type:"advance_over", qty:-extraBase,
+        unitType:item.unitType||"Item", unitsSold:collQty-paidQty,
+        ref:`ADV-${aid.slice(-6).toUpperCase()}-OVER`, date:Date.now()
+      });
+    } else if (collQty < paidQty) {
+      // Under-collected — restore the uncollected portion
+      const restoreBase = (paidQty - collQty) * (item.qtyPerUnit||1);
+      products[idx].qty += restoreBase;
+      await fsUpdate("products", item.productId, { qty: products[idx].qty });
+      await fsAdd("inventoryLogs",{
+        productId:item.productId, productName:item.name,
+        type:"advance_restore", qty:+restoreBase,
+        unitType:item.unitType||"Item", unitsSold:paidQty-collQty,
+        ref:`ADV-${aid.slice(-6).toUpperCase()}-PARTIAL`, date:Date.now()
+      });
+    }
+    // collQty === paidQty: stock was already deducted at reservation — nothing to do
   }
-  toast("Marked as collected & added to Sales Report! ✅","success"); renderAdvance();
+  Store.set("products", products);
+
+  // 2. Record collected items to sales history
+  const saleItems = collectedItems.map(i=>({
+    id:i.productId||"adv-"+aid, name:i.name, qty:i.qty,
+    price:i.unitPrice, cost:0, unitType:i.unitType||"Item", qtyPerUnit:1
+  }));
+  const collectedTotal = collectedItems.reduce((s,i)=>s+i.lineTotal,0);
+  await fsAdd("sales",{
+    txId: txnId(), date: Date.now(),
+    customer: { name: adv.customerName, phone: adv.customerPhone||"" },
+    items: saleItems,
+    subtotal: collectedTotal, discount:0, tax:0, total:collectedTotal,
+    payMethod:"advance_collected", salesRep: currentUser?.name||"System",
+    note:"Advance collection" + (remainingItems.length ? " (partial)" : ""),
+    source:"advance", status:"completed"
+  });
+
+  // 3. If over-collected → create/add to debt
+  if (extraCost > 0) {
+    const debtGoods = collectedItems
+      .filter((ci,idx)=>ci.qty > items[idx]?.qty)
+      .map(ci=>`${ci.name} (${ci.unitType})`).join(", ");
+    await fsAdd("debts",{
+      customerName: adv.customerName,
+      customerPhone: adv.customerPhone||"",
+      goods: `Extra collected: ${debtGoods}`,
+      items: collectedItems.filter((ci,idx)=>ci.qty > items[idx]?.qty).map(ci=>({...ci})),
+      totalAmount: extraCost, amountPaid:0, balance: extraCost,
+      dueDate: futureDate(14), status:"unpaid",
+      payHistory:[],
+      note:`Auto-created: customer collected more than advance paid for (Adv #${aid.slice(-6).toUpperCase()})`
+    });
+    toast(`Over-collection: ₦${fmt(extraCost)} added to debt automatically`,"info");
+  }
+
+  // 4. If items remain (partial collection) → create a new pending advance for the remainder
+  if (remainingItems.length > 0) {
+    const remTotal = remainingItems.reduce((s,i)=>s+i.lineTotal,0);
+    const remProduct = remainingItems.map(i=>`${i.name} (${i.unitType}) ×${i.qty}`).join(", ");
+    await fsAdd("advance",{
+      customerName: adv.customerName,
+      customerPhone: adv.customerPhone||"",
+      product: remProduct,
+      items: remainingItems,
+      totalCost: remTotal,
+      amountPaid: 0,
+      balance: remTotal,
+      expectedPickup: adv.expectedPickup||futureDate(7),
+      notes: `Remaining from partial collection of advance #${aid.slice(-6).toUpperCase()}`,
+      status:"pending"
+    });
+    toast(`Remaining items kept as new pending advance for ${adv.customerName}`,"info");
+  }
+
+  // 5. Mark original advance as collected
+  await fsUpdate("advance", aid, { status:"collected", collectedAt: Date.now() });
+
+  closeModal("adv-collect-modal");
+  toast("Collection recorded & added to Sales History ✅","success");
+  renderAdvance();
+  updateNavBadges();
 }
 
 async function deleteAdvance(aid) {
-  if (!confirm("Delete this advance record?")) return;
-  await fsDelete("advance",aid); toast("Deleted","info"); renderAdvance();
+  if (!confirm("Delete this advance record? Reserved stock will be restored if the advance is still pending.")) return;
+  const adv = fsGet("advance").find(a=>a.id===aid);
+  // Only restore stock for pending advances — collected ones were already deducted at collection time
+  if (adv?.status === "pending" && adv?.items?.length) {
+    await _restoreItemsToStock(adv.items, `ADV-DEL-${aid.slice(-6).toUpperCase()}`, "advance_restore");
+    toast("Advance deleted — reserved stock restored","info");
+  } else {
+    toast("Deleted","info");
+  }
+  await fsDelete("advance",aid);
+  renderAdvance();
+  updateNavBadges();
 }
 
 /* ============================================================
