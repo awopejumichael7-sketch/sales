@@ -897,6 +897,22 @@ letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px}
      ============================================================ -->
 <script>
 /* ============================================================
+   DOUBLE-CLICK / DUPLICATE ACTION GUARD
+   - actionGuard(key, fn, delay): runs fn once per delay ms per key
+   - debounce(fn, ms): returns debounced fn
+   ============================================================ */
+const _actionTimers = {};
+function debounce(fn, ms) {
+  ms = ms || 220;
+  var t;
+  return function() {
+    var self = this, args = arguments;
+    clearTimeout(t);
+    t = setTimeout(function() { fn.apply(self, args); }, ms);
+  };
+}
+
+/* ============================================================
    FIREBASE CONFIG
    NOTE: Replace these with your actual Firebase project config.
    The app falls back to localStorage when Firebase is unavailable.
@@ -1352,11 +1368,25 @@ function togglePwd() {
 }
 
 function doLogin() {
+  if (_actionTimers["doLogin"]) return;
+  _actionTimers["doLogin"] = true; // _loginGuarded
+  var _lb = document.querySelector(".btn-login");
+  if (_lb) { _lb.disabled = true; _lb.textContent = "Signing in..."; }
+  setTimeout(function() {
+    delete _actionTimers["doLogin"];
+    if (_lb) { _lb.disabled = false; _lb.textContent = "Sign In ->"; }
+  }, 1500);
   const u = document.getElementById("login-user").value.trim().toLowerCase();
   const p = document.getElementById("login-pass").value;
   const err = document.getElementById("login-error");
   const found = USERS.find(x => x.username.toLowerCase() === u && x.password === p);
-  if (!found) { err.style.display = "block"; return; }
+  if (!found) {
+    err.style.display = "block";
+    // Clear the guard immediately so they can retry right away
+    delete _actionTimers["doLogin"];
+    if (_lb) { _lb.disabled = false; _lb.textContent = "Sign In ->"; }
+    return;
+  }
   err.style.display = "none";
   currentUser = found;
   Store.setOne("session", { ...found, loginTime: Date.now() });
@@ -1705,6 +1735,8 @@ function buildPaySummaryHtml() {
 function drawRevenueChart() {
   const ctx = document.getElementById("rev-chart");
   if (!ctx) return;
+  // Destroy existing chart instance to prevent duplicate overlays on re-render
+  if (ctx._chartInstance) { ctx._chartInstance.destroy(); ctx._chartInstance = null; }
   const sales = fsGet("sales");
   const labels = [];
   const data = [];
@@ -1715,7 +1747,7 @@ function drawRevenueChart() {
     data.push(sales.filter(s=>s.date>=d.getTime()&&s.date<next.getTime()).reduce((a,s)=>a+s.total,0));
   }
   const isDark = document.documentElement.dataset.theme !== "light";
-  new Chart(ctx, {
+  ctx._chartInstance = new Chart(ctx, {
     type:"bar",
     data:{ labels, datasets:[{ data, backgroundColor:"rgba(240,192,64,0.25)", borderColor:"#f0c040",
       borderWidth:2, borderRadius:6, borderSkipped:false }] },
@@ -1736,7 +1768,7 @@ function renderCheckout() {
       <div class="products-panel">
         <div class="toolbar">
           <div class="search-wrap"><span class="search-icon">🔍</span>
-            <input type="text" id="pos-search" placeholder="Search products by name or SKU..." oninput="filterPosProducts()"/>
+            <input type="text" id="pos-search" placeholder="Search products by name or SKU..." oninput="_dFilterPosProducts()"/>
           </div>
           <select class="filter-select" id="pos-cat" onchange="filterPosProducts()">
             <option value="">All Categories</option>
@@ -2107,7 +2139,9 @@ function openCheckoutModal() {
       <div style="margin-top:10px">
         <span class="badge ${payBadge(selectedPayMethod)}">${payLabel(selectedPayMethod, getSplitBreakdown())}</span>
         ${getSplitBreakdown() ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:4px;font-family:var(--font-mono)">
-          ${selectedPayMethod==="pos_cash"?"POS":"Transfer"}: ${fmt(getSplitBreakdown()[selectedPayMethod==="pos_cash"?"pos":"transfer"]||0)} + Cash: ${fmt(getSplitBreakdown().cash||0)}
+          ${getSplitBreakdown().transfer ? "🏦 Transfer: "+fmt(getSplitBreakdown().transfer) : ""}
+          ${getSplitBreakdown().pos ? (getSplitBreakdown().transfer?" + ":"")+"💳 POS: "+fmt(getSplitBreakdown().pos) : ""}
+          ${getSplitBreakdown().cash ? " + 💵 Cash: "+fmt(getSplitBreakdown().cash) : ""}
         </div>` : ""}
       </div>
     </div>`,
@@ -2119,6 +2153,17 @@ function openCheckoutModal() {
 }
 
 async function completeSale(sub, disc, tax, total) {
+  if (_actionTimers["completeSale"]) return;
+  _actionTimers["completeSale"] = true;
+  var _csBtn = document.querySelector("#checkout-modal .btn-primary");
+  if (_csBtn) { _csBtn.disabled = true; _csBtn.textContent = "Processing..."; }
+  try { await _completeSaleCore(sub, disc, tax, total); }
+  finally {
+    setTimeout(function() { delete _actionTimers["completeSale"]; }, 2000);
+    if (_csBtn) { _csBtn.disabled = false; _csBtn.textContent = "Confirm & Complete ->"; }
+  }
+}
+async function _completeSaleCore(sub, disc, tax, total) {
   const name = document.getElementById("co-name")?.value?.trim();
   if (!name) { toast("Customer name required", "error"); return; }
   const phone = document.getElementById("co-phone")?.value?.trim();
@@ -2219,14 +2264,9 @@ function showReceipt(sale, items) {
           <span>${payLabel(sale.payMethod, sale.splitPayment)}</span>
         </div>
         ${sale.splitPayment ? `
-        <div class="receipt-row" style="font-size:10px;color:#999">
-          <span>${sale.payMethod==="pos_cash"?"POS:":"Transfer:"}</span>
-          <span>${fmt(sale.splitPayment.transfer||sale.splitPayment.pos||0)}</span>
-        </div>
-        <div class="receipt-row" style="font-size:10px;color:#999">
-          <span>Cash:</span>
-          <span>${fmt(sale.splitPayment.cash||0)}</span>
-        </div>` : ""}
+        ${sale.splitPayment.transfer ? `<div class="receipt-row" style="font-size:10px;color:#999"><span>Transfer:</span><span>${fmt(sale.splitPayment.transfer)}</span></div>` : ""}
+        ${sale.splitPayment.pos ? `<div class="receipt-row" style="font-size:10px;color:#999"><span>POS:</span><span>${fmt(sale.splitPayment.pos)}</span></div>` : ""}
+        ${sale.splitPayment.cash ? `<div class="receipt-row" style="font-size:10px;color:#999"><span>Cash:</span><span>${fmt(sale.splitPayment.cash)}</span></div>` : ""}` : ""}
       </div>
       <div class="receipt-footer">
         ✨ Thank you for shopping with us!<br/>Come back soon.
@@ -2244,6 +2284,7 @@ function showReceipt(sale, items) {
 function printReceipt() {
   const el = document.getElementById("receipt-print");
   const w = window.open("","_blank","width=400,height=700");
+  if (!w) { toast("Pop-up blocked — allow pop-ups to print","warning"); return; }
   w.document.write(`<html><head><title>Receipt</title>
     <style>body{font-family:monospace;font-size:12px;margin:0;padding:16px}
     .receipt-row{display:flex;justify-content:space-between;margin-bottom:4px}
@@ -2277,7 +2318,7 @@ function renderProducts() {
     </div>
     <div class="toolbar">
       <div class="search-wrap"><span class="search-icon">🔍</span>
-        <input type="text" id="prod-search" placeholder="Search by name, SKU, or category..." oninput="filterProducts()"/>
+        <input type="text" id="prod-search" placeholder="Search by name, SKU, or category..." oninput="_dFilterProducts()"/>
       </div>
       <select class="filter-select" id="prod-cat" onchange="filterProducts()">
         <option value="">All Categories</option>
@@ -2456,6 +2497,18 @@ function openProductModal(pid) {
 }
 
 async function saveProduct(pid) {
+  var _spKey = "saveProduct_" + (pid || "new");
+  if (_actionTimers[_spKey]) return;
+  _actionTimers[_spKey] = true;
+  var _spBtn = document.querySelector("#prod-modal .btn-primary");
+  if (_spBtn) { _spBtn.disabled = true; _spBtn.textContent = "Saving..."; }
+  try { await _saveProductCore(pid); }
+  finally {
+    setTimeout(function() { delete _actionTimers[_spKey]; }, 1500);
+    if (_spBtn) { _spBtn.disabled = false; _spBtn.textContent = "Save Product"; }
+  }
+}
+async function _saveProductCore(pid) {
   const name = document.getElementById("pf-name")?.value?.trim();
   const sku  = document.getElementById("pf-sku")?.value?.trim();
   if (!name || !sku) { toast("Name and SKU required","error"); return; }
@@ -2521,7 +2574,7 @@ function renderCustomers() {
     </div>
     <div class="toolbar">
       <div class="search-wrap"><span class="search-icon">🔍</span>
-        <input type="text" id="cust-search" placeholder="Search by name or phone..." oninput="filterCustomers()"/>
+        <input type="text" id="cust-search" placeholder="Search by name or phone..." oninput="_dFilterCustomers()"/>
       </div>
     </div>
     <div class="table-wrap">
@@ -2611,7 +2664,7 @@ function renderSales() {
     </div>
     <div class="toolbar">
       <div class="search-wrap"><span class="search-icon">🔍</span>
-        <input type="text" id="sales-search" placeholder="Search by name, TX ID, or rep..." oninput="filterSales()"/>
+        <input type="text" id="sales-search" placeholder="Search by name, TX ID, or rep..." oninput="_dFilterSales()"/>
       </div>
       <select class="filter-select" id="sales-pay" onchange="filterSales()">
         <option value="">All Payments</option>
@@ -2761,6 +2814,18 @@ function confirmDeleteSale(saleId) {
 }
 
 async function executeSaleDelete(saleId, txIdFallback) {
+  var _gk = "del_" + saleId;
+  if (_actionTimers[_gk]) return;
+  _actionTimers[_gk] = true;
+  var _db = document.querySelector("#delete-sale-modal .btn-danger");
+  if (_db) { _db.disabled = true; _db.textContent = "Deleting..."; }
+  try { await _executeSaleDeleteCore(saleId, txIdFallback); }
+  finally {
+    setTimeout(function() { delete _actionTimers[_gk]; }, 2000);
+    if (_db) { _db.disabled = false; _db.textContent = "Delete & Restore Stock"; }
+  }
+}
+async function _executeSaleDeleteCore(saleId, txIdFallback) {
   const allSales = fsGet("sales");
   const sale = allSales.find(s => s.id === saleId || s.txId === saleId || s.txId === txIdFallback);
   if (!sale) { toast("Transaction not found","error"); return; }
@@ -2816,7 +2881,7 @@ function renderDebts() {
     </div>
     <div class="toolbar">
       <div class="search-wrap"><span class="search-icon">🔍</span>
-        <input type="text" id="debt-search" placeholder="Search by customer name..." oninput="filterDebts()"/>
+        <input type="text" id="debt-search" placeholder="Search by customer name..." oninput="_dFilterDebts()"/>
       </div>
       <select class="filter-select" id="debt-status" onchange="filterDebts()">
         <option value="">All Status</option>
@@ -3195,7 +3260,21 @@ async function _reconcileStockDiff(oldItems, newItems, refLabel) {
   Store.set("products", products);
 }
 
-async function saveDebt(editId="") {
+async function saveDebt(editId) {
+  editId = editId || "";
+  var _gk = "saveDebt_" + (editId || "new");
+  if (_actionTimers[_gk]) return;
+  _actionTimers[_gk] = true;
+  var _sb = document.querySelector("#debt-modal .btn-primary");
+  if (_sb) { _sb.disabled = true; _sb.textContent = "Saving..."; }
+  try { await _saveDebtCore(editId); }
+  finally {
+    setTimeout(function() { delete _actionTimers[_gk]; }, 1500);
+    if (_sb) { _sb.disabled = false; _sb.textContent = editId ? "Update Debt" : "Save Debt"; }
+  }
+}
+async function _saveDebtCore(editId) {
+  editId = editId || "";
   const name = document.getElementById("df-name")?.value?.trim();
   const total = parseFloat(document.getElementById("df-total")?.value)||0;
   if (!name) { toast("Customer name required","error"); return; }
@@ -3215,7 +3294,12 @@ async function saveDebt(editId="") {
       dueDate:document.getElementById("df-due")?.value, status,
       payHistory:existing?.payHistory||[]
     });
-    if (balance<=0) await autoMoveDebtToSales(editId);
+    // Only auto-move to sales if not already moved (avoid duplicate sale records)
+    if (balance<=0) {
+      const alreadyMoved = fsGet("sales").some(s => s.source === "debt" &&
+        s.customer?.name === (existing?.customerName || name));
+      if (!alreadyMoved) await autoMoveDebtToSales(editId);
+    }
     toast("Debt updated","success");
   } else {
     // New debt — deduct from stock immediately
@@ -3234,7 +3318,7 @@ function recordDebtPayment(did) {
   const debt = fsGet("debts").find(d=>d.id===did);
   if (!debt) return;
   createModal("pay-modal","Record Payment",`
-    <div style="margin-bottom:16px" class="card" style="background:var(--bg-elevated)">
+    <div class="card" style="margin-bottom:16px;background:var(--bg-elevated)">
       <div class="cart-row"><span>Customer:</span><span class="fw-700">${escHtml(debt.customerName)}</span></div>
       <div class="cart-row"><span>Outstanding Balance:</span><span class="fw-700 text-red">${fmt(debt.balance)}</span></div>
     </div>
@@ -3247,10 +3331,23 @@ function recordDebtPayment(did) {
 }
 
 async function confirmDebtPayment(did, maxBal) {
+  var _gk = "debtPay_" + did;
+  if (_actionTimers[_gk]) return;
+  _actionTimers[_gk] = true;
+  var _pb = document.querySelector("#pay-modal .btn-success");
+  if (_pb) { _pb.disabled = true; _pb.textContent = "Recording..."; }
+  try { await _debtPayCore(did, maxBal); }
+  finally {
+    setTimeout(function() { delete _actionTimers[_gk]; }, 1500);
+    if (_pb) { _pb.disabled = false; _pb.textContent = "Record Payment"; }
+  }
+}
+async function _debtPayCore(did, maxBal) {
   const amount = parseFloat(document.getElementById("pay-amount")?.value)||0;
   const note = document.getElementById("pay-note")?.value?.trim();
   if (!amount || amount <= 0) { toast("Enter valid amount","error"); return; }
   const debt = fsGet("debts").find(d=>d.id===did);
+  if (!debt) { toast("Debt record not found","error"); return; }
   const newPaid = debt.amountPaid + amount;
   const newBal = Math.max(0, debt.totalAmount - newPaid);
   const status = newBal<=0?"fully_paid":newPaid>0?"partially_paid":"unpaid";
@@ -3282,14 +3379,22 @@ async function autoMoveDebtToSales(did) {
 }
 
 async function deleteDebt(did) {
-  if (!confirm("Delete this debt record? Stock will be restored for any items that were deducted.")) return;
   const debt = fsGet("debts").find(d=>d.id===did);
-  // Restore stock for items that were deducted when the debt was created/updated
-  if (debt?.items?.length) {
+  const isFullyPaid = debt?.status === "fully_paid";
+  const msg = isFullyPaid
+    ? "Delete this debt record? This debt is fully paid — stock will NOT be restored (goods were already sold)."
+    : "Delete this debt record? Stock will be restored for any items that were deducted.";
+  if (!confirm(msg)) return;
+  // Only restore stock if the debt is NOT fully paid.
+  // When fully paid, stock was already deducted at creation and the sale has
+  // been recorded — restoring it again would incorrectly add those units back.
+  if (!isFullyPaid && debt?.items?.length) {
     await _restoreItemsToStock(debt.items, `DEBT-DEL-${did.slice(-6).toUpperCase()}`, "debt_restore");
+    toast("Debt deleted — stock restored", "info");
+  } else {
+    toast("Debt record deleted", "info");
   }
-  await fsDelete("debts",did);
-  toast("Debt deleted — stock restored","info");
+  await fsDelete("debts", did);
   renderDebts();
   updateNavBadges();
 }
@@ -3309,7 +3414,7 @@ function renderAdvance() {
     </div>
     <div class="toolbar">
       <div class="search-wrap"><span class="search-icon">🔍</span>
-        <input type="text" id="adv-search" placeholder="Search by customer name..." oninput="filterAdvance()"/>
+        <input type="text" id="adv-search" placeholder="Search by customer name..." oninput="_dFilterAdvance()"/>
       </div>
       <select class="filter-select" id="adv-status" onchange="filterAdvance()">
         <option value="">All Status</option>
@@ -3335,7 +3440,21 @@ function filterAdvance() {
   const tbody = document.getElementById("advance-tbody");
   if (!tbody) return;
   if (!advances.length) { tbody.innerHTML=`<tr><td colspan="8"><div class="empty-state"><div class="empty-icon">⏳</div><p>No advance payments found</p></div></td></tr>`; return; }
-  tbody.innerHTML = advances.map(a=>`<tr>
+  tbody.innerHTML = advances.map(a=>{
+    const isCollected = a.status === "collected";
+
+    // For collected records: show the actual collected value & what was applied
+    // For pending records: show the booked total, amount paid, and balance
+    const displayTotal    = isCollected ? (a.collectedValue ?? a.totalCost) : a.totalCost;
+    const displayPaid     = isCollected ? (a.amountPaidApplied ?? a.amountPaid) : a.amountPaid;
+    const displayBalance  = Math.max(0, displayTotal - displayPaid);
+
+    // Tooltip hint for collected rows that had partial pickup
+    const collectedHint = isCollected && a.remainingAdvanceCreated
+      ? `<div style="font-size:10px;color:var(--blue);margin-top:2px;font-family:var(--font-mono)">PARTIAL — remainder kept as new advance</div>`
+      : "";
+
+    return `<tr>
     <td><div class="fw-700">${escHtml(a.customerName)}</div>
     ${a.customerPhone?`<div style="font-size:11px;color:var(--text-muted)">${escHtml(a.customerPhone)}</div>`:""}
     </td>
@@ -3344,23 +3463,33 @@ function filterAdvance() {
         ? a.items.map(i=>`<div style="display:flex;align-items:center;gap:4px;margin-bottom:3px">
             <span>${escHtml(i.emoji||"📦")}</span>
             <span>${escHtml(i.name)}</span>
-            <span style="font-size:10px;background:var(--accent-glow);color:var(--accent);padding:1px 5px;border-radius:99px;font-family:var(--font-mono)">${escHtml(i.unitType)}</span>
+            <span style="font-size:10px;background:var(--accent-glow);color:var(--accent);padding:1px 5px;border-radius:99px;font-family:var(--font-mono)">${escHtml(i.unitType)} ×${i.qty}</span>
           </div>`).join("")
         : escHtml(a.product)
       }
     </td>
-    <td class="text-green fw-700">${fmt(a.amountPaid)}</td>
-    <td>${fmt(a.totalCost)}</td>
-    <td class="text-accent fw-700">${fmt(a.balance)}</td>
+    <td class="text-green fw-700">${fmt(displayPaid)}
+      ${isCollected && a.amountPaidApplied != null && a.amountPaidApplied !== a.amountPaid
+        ? `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">of ${fmt(a.amountPaid)} deposited</div>`
+        : ""}
+    </td>
+    <td>${fmt(displayTotal)}
+      ${isCollected && a.collectedValue != null && a.collectedValue !== a.totalCost
+        ? `<div style="font-size:10px;color:var(--text-muted);margin-top:2px">booked: ${fmt(a.totalCost)}</div>`
+        : ""}
+    </td>
+    <td class="${displayBalance > 0 ? "text-accent fw-700" : "text-green fw-700"}">${displayBalance > 0 ? fmt(displayBalance) : "✓ Settled"}</td>
     <td class="td-mono">${a.expectedPickup||"—"}</td>
-    <td><span class="badge ${a.status==="collected"?"badge-green":"badge-orange"}">${a.status==="collected"?"✓ Collected":"⏳ Pending"}</span>
-    ${a.collectedAt?`<div style="font-size:10px;color:var(--text-muted);margin-top:2px">Collected: ${fmtDate(a.collectedAt)}</div>`:""}</td>
+    <td><span class="badge ${isCollected?"badge-green":"badge-orange"}">${isCollected?"✓ Collected":"⏳ Pending"}</span>
+    ${a.collectedAt?`<div style="font-size:10px;color:var(--text-muted);margin-top:2px">Collected: ${fmtDate(a.collectedAt)}</div>`:""}
+    ${collectedHint}</td>
     <td><div class="td-actions">
       ${a.status==="pending"?`<button class="btn btn-success btn-sm" onclick="markAdvanceCollected('${a.id}')">✓ Collected</button>`:""}
       <button class="btn btn-secondary btn-icon btn-sm" onclick="openAdvanceModal('${a.id}')" title="Edit">✏️</button>
       <button class="btn btn-danger btn-icon btn-sm" onclick="deleteAdvance('${a.id}')">🗑️</button>
     </div></td>
-  </tr>`).join("");
+  </tr>`;
+  }).join("");
 }
 
 function openAdvanceModal(editId="") {
@@ -3392,7 +3521,21 @@ function openAdvanceModal(editId="") {
   renderTrackerItems("advance");
 }
 
-async function saveAdvance(editId="") {
+async function saveAdvance(editId) {
+  editId = editId || "";
+  var _gk = "saveAdv_" + (editId || "new");
+  if (_actionTimers[_gk]) return;
+  _actionTimers[_gk] = true;
+  var _sb = document.querySelector("#adv-modal .btn-primary");
+  if (_sb) { _sb.disabled = true; _sb.textContent = "Saving..."; }
+  try { await _saveAdvanceCore(editId); }
+  finally {
+    setTimeout(function() { delete _actionTimers[_gk]; }, 1500);
+    if (_sb) { _sb.disabled = false; _sb.textContent = editId ? "Update Advance" : "Save Advance"; }
+  }
+}
+async function _saveAdvanceCore(editId) {
+  editId = editId || "";
   const name = document.getElementById("af-name")?.value?.trim();
   const total = parseFloat(document.getElementById("af-total")?.value)||0;
   const paid = parseFloat(document.getElementById("af-paid")?.value)||0;
@@ -3430,6 +3573,9 @@ async function saveAdvance(editId="") {
 }
 
 function markAdvanceCollected(aid) {
+  if (_actionTimers["markAdv_"+aid]) return; // _markAdvCollGuard
+  _actionTimers["markAdv_"+aid] = true;
+  setTimeout(function() { delete _actionTimers["markAdv_"+aid]; }, 2000);
   const adv = fsGet("advance").find(a=>a.id===aid);
   if (!adv) return;
 
@@ -3503,156 +3649,265 @@ function updateCollectionSummary(idx, paidQty, unitPrice) {
   const collectedQty = parseFloat(document.getElementById(`coll-qty-${idx}`)?.value)||0;
   const diff = collectedQty - paidQty;
   const remEl = document.getElementById(`coll-rem-${idx}`);
-  // Auto-suggest remaining if they collect less
-  if (diff < 0 && remEl) { remEl.value = Math.abs(diff); }
+  // Auto-suggest remaining if they collect less (but don't auto-fill if user already typed something)
+  if (diff < 0 && remEl && (parseFloat(remEl.value)||0) === 0) { remEl.value = Math.max(0, paidQty - collectedQty); }
   if (diff >= 0 && remEl) { remEl.value = 0; }
+
+  // Recalculate and show live summary
+  const advId = document.querySelector("#adv-collect-modal .btn-success")?.getAttribute("onclick")?.match(/'([^']+)'/)?.[1];
+  const allInputs = document.querySelectorAll("[id^='coll-qty-']");
+  let totalCollectedValue = 0;
+  let totalRemainingValue = 0;
+  let hasOver = false;
+  allInputs.forEach((inp, i) => {
+    const row = document.getElementById(`coll-row-${i}`);
+    if (!row) return;
+    const cq = parseFloat(inp.value)||0;
+    const rq = parseFloat(document.getElementById(`coll-rem-${i}`)?.value)||0;
+    // Extract unitPrice from oninput attr
+    const onip = inp.getAttribute("oninput")||"";
+    const match = onip.match(/,(\d+(?:\.\d+)?)\)/);
+    const up = match ? parseFloat(match[1]) : 0;
+    const bq = parseFloat(onip.match(/,(\d+(?:\.\d+)?),/)?.[1])||0;
+    totalCollectedValue += cq * up;
+    totalRemainingValue += rq * up;
+    if (cq > bq) hasOver = true;
+  });
+
+  const summaryEl = document.getElementById("coll-summary");
+  if (summaryEl) {
+    summaryEl.style.display = "block";
+    summaryEl.innerHTML = `
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+        <span style="color:var(--text-secondary)">Value of goods being collected:</span>
+        <span style="color:var(--green);font-weight:700">${fmt(totalCollectedValue)}</span>
+      </div>
+      ${totalRemainingValue > 0 ? `<div style="display:flex;justify-content:space-between;margin-bottom:6px">
+        <span style="color:var(--text-secondary)">Value staying as new advance:</span>
+        <span style="color:var(--blue);font-weight:700">${fmt(totalRemainingValue)}</span>
+      </div>` : ""}
+      ${hasOver ? `<div style="padding:6px 8px;background:var(--red-dim);border-radius:6px;color:var(--red);font-size:11px;margin-top:4px">
+        ⚠ Over-collection detected — excess will be added to customer's debt
+      </div>` : ""}
+    `;
+  }
 }
 
 async function confirmAdvanceCollection(aid, items) {
+  var _gk = "advColl_" + aid;
+  if (_actionTimers[_gk]) return;
+  _actionTimers[_gk] = true;
+  var _cb = document.querySelector("#adv-collect-modal .btn-success");
+  if (_cb) { _cb.disabled = true; _cb.textContent = "Processing..."; }
+  try { await _advCollCore(aid, items); }
+  finally {
+    setTimeout(function() { delete _actionTimers[_gk]; }, 2000);
+    if (_cb) { _cb.disabled = false; _cb.textContent = "Confirm Collection"; }
+  }
+}
+async function _advCollCore(aid, items) {
   const adv = fsGet("advance").find(a=>a.id===aid);
   if (!adv) return;
 
   const collectedItems = [];
   const remainingItems = [];
   let extraCost = 0;
-  let collectedTotalValue = 0;
 
-  items.forEach((item,idx) => {
-    const collQty = parseFloat(document.getElementById(`coll-qty-${idx}`)?.value)||0;
-    const remQty  = parseFloat(document.getElementById(`coll-rem-${idx}`)?.value)||0;
+  // First pass: gather collected & remaining items
+  items.forEach((item, idx) => {
+    const collQty = parseFloat(document.getElementById(`coll-qty-${idx}`)?.value) || 0;
+    const remQty  = parseFloat(document.getElementById(`coll-rem-${idx}`)?.value) || 0;
     const paidQty = item.qty;
 
     if (collQty > 0) {
       collectedItems.push({ ...item, qty: collQty, lineTotal: collQty * item.unitPrice });
-      collectedTotalValue += collQty * item.unitPrice;
     }
 
-    // Over-collected: customer took more than paid for
+    // Over-collected: customer took more than was booked for this item
     if (collQty > paidQty) {
       const overQty = collQty - paidQty;
       extraCost += overQty * item.unitPrice;
     }
 
-    // Under-collected with a remaining amount specified
+    // Under-collected: whatever the user typed as remaining stays in advance
     if (remQty > 0) {
       remainingItems.push({ ...item, qty: remQty, lineTotal: remQty * item.unitPrice });
     }
   });
 
-  if (!collectedItems.length) { toast("Enter at least one collected quantity","error"); return; }
+  if (!collectedItems.length) { toast("Enter at least one collected quantity", "error"); return; }
 
-  // 1. Stock was already deducted when the advance was created (reserved).
-  //    At collection time we only need to handle differences:
-  //    - Over-collected (collQty > paidQty): deduct the EXTRA units
-  //    - Under-collected / remaining items:  restore the un-collected units back to stock
+  // ── Value calculations ────────────────────────────────────────────────────
+  // Total value of ALL booked items (what the customer originally reserved)
+  const bookedTotal = items.reduce((s, i) => s + (i.qty * i.unitPrice), 0);
+
+  // Total value of items actually collected this session
+  const collectedGoodsValue = collectedItems.reduce((s, i) => s + i.lineTotal, 0);
+
+  // Total value of items the customer is leaving behind (remaining)
+  const remainingGoodsValue = remainingItems.reduce((s, i) => s + i.lineTotal, 0);
+
+  // The original amountPaid by the customer (their deposit)
+  const totalAmountPaid = adv.amountPaid || 0;
+
+  // Proportionally split the deposit between what was collected vs what remains.
+  // If bookedTotal is 0 we avoid divide-by-zero and assign all paid to collected.
+  let amountPaidForCollected, amountPaidForRemaining;
+  if (bookedTotal > 0) {
+    amountPaidForCollected = Math.min(totalAmountPaid, (collectedGoodsValue / bookedTotal) * totalAmountPaid);
+    amountPaidForRemaining = totalAmountPaid - amountPaidForCollected;
+  } else {
+    amountPaidForCollected = totalAmountPaid;
+    amountPaidForRemaining = 0;
+  }
+  // Round to 2 decimals to avoid floating-point dust
+  amountPaidForCollected = Math.round(amountPaidForCollected * 100) / 100;
+  amountPaidForRemaining = Math.round(amountPaidForRemaining * 100) / 100;
+
+  // Balance remaining on the collected portion (may be negative if over-paid, cap at 0)
+  const balanceOnCollected = Math.max(0, collectedGoodsValue - amountPaidForCollected);
+
+  // ── 1. Stock adjustments ─────────────────────────────────────────────────
+  // Stock was already deducted when the advance was created (reserved).
+  // At collection time we ONLY touch stock for over-collection (customer
+  // took MORE than reserved). Under-collected items stay reserved in stock —
+  // they are carried forward in a new pending advance. Stock is only
+  // returned when that remaining advance is deleted/cancelled.
   const products = fsGet("products");
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const collQty = parseFloat(document.getElementById(`coll-qty-${i}`)?.value)||0;
+    const collQty = parseFloat(document.getElementById(`coll-qty-${i}`)?.value) || 0;
     const paidQty = item.qty;
-    const idx = products.findIndex(p=>p.id===item.productId);
-    if (idx === -1) continue;
+    const pidx = products.findIndex(p => p.id === item.productId);
+    if (pidx === -1) continue;
 
     if (collQty > paidQty) {
-      // Extra units taken — deduct the overage
-      const extraBase = (collQty - paidQty) * (item.qtyPerUnit||1);
-      products[idx].qty = Math.max(0, products[idx].qty - extraBase);
-      await fsUpdate("products", item.productId, { qty: products[idx].qty });
-      await fsAdd("inventoryLogs",{
-        productId:item.productId, productName:item.name,
-        type:"advance_over", qty:-extraBase,
-        unitType:item.unitType||"Item", unitsSold:collQty-paidQty,
-        ref:`ADV-${aid.slice(-6).toUpperCase()}-OVER`, date:Date.now()
-      });
-    } else if (collQty < paidQty) {
-      // Under-collected — restore the uncollected portion
-      const restoreBase = (paidQty - collQty) * (item.qtyPerUnit||1);
-      products[idx].qty += restoreBase;
-      await fsUpdate("products", item.productId, { qty: products[idx].qty });
-      await fsAdd("inventoryLogs",{
-        productId:item.productId, productName:item.name,
-        type:"advance_restore", qty:+restoreBase,
-        unitType:item.unitType||"Item", unitsSold:paidQty-collQty,
-        ref:`ADV-${aid.slice(-6).toUpperCase()}-PARTIAL`, date:Date.now()
+      // Extra units taken — deduct overage from stock
+      const extraBase = (collQty - paidQty) * (item.qtyPerUnit || 1);
+      products[pidx].qty = Math.max(0, products[pidx].qty - extraBase);
+      await fsUpdate("products", item.productId, { qty: products[pidx].qty });
+      await fsAdd("inventoryLogs", {
+        productId: item.productId, productName: item.name,
+        type: "advance_over", qty: -extraBase,
+        unitType: item.unitType || "Item", unitsSold: collQty - paidQty,
+        ref: `ADV-${aid.slice(-6).toUpperCase()}-OVER`, date: Date.now()
       });
     }
-    // collQty === paidQty: stock was already deducted at reservation — nothing to do
+    // collQty < paidQty: remaining stay reserved — stock NOT restored here.
+    // collQty === paidQty: nothing to do.
   }
   Store.set("products", products);
 
-  // 2. Record collected items to sales history
-  const saleItems = collectedItems.map(i=>({
-    id:i.productId||"adv-"+aid, name:i.name, qty:i.qty,
-    price:i.unitPrice, cost:0, unitType:i.unitType||"Item", qtyPerUnit:1
+  // ── 2. Record collected items to sales history ───────────────────────────
+  // The sale total is the value of goods collected.
+  // The amountPaid field on the sale = the portion of the advance deposit that
+  // covers the collected goods. Balance (if any) is what the customer still owes.
+  const saleItems = collectedItems.map(i => ({
+    id: i.productId || "adv-" + aid, name: i.name, qty: i.qty,
+    price: i.unitPrice, cost: 0, unitType: i.unitType || "Item", qtyPerUnit: 1
   }));
-  const collectedTotal = collectedItems.reduce((s,i)=>s+i.lineTotal,0);
-  await fsAdd("sales",{
+  await fsAdd("sales", {
     txId: txnId(), date: Date.now(),
-    customer: { name: adv.customerName, phone: adv.customerPhone||"" },
+    customer: { name: adv.customerName, phone: adv.customerPhone || "" },
     items: saleItems,
-    subtotal: collectedTotal, discount:0, tax:0, total:collectedTotal,
-    payMethod:"advance_collected", salesRep: currentUser?.name||"System",
-    note:"Advance collection" + (remainingItems.length ? " (partial)" : ""),
-    source:"advance", status:"completed"
+    subtotal: collectedGoodsValue,
+    discount: 0,
+    tax: 0,
+    total: collectedGoodsValue,
+    amountPaid: amountPaidForCollected,
+    balanceDue: balanceOnCollected,
+    payMethod: "advance_collected",
+    salesRep: currentUser?.name || "System",
+    note: "Advance collection" + (remainingItems.length ? " (partial)" : ""),
+    source: "advance",
+    status: "completed"
   });
 
-  // 3. If over-collected → create/add to debt
+  // ── 3. If over-collected → add to debt ───────────────────────────────────
   if (extraCost > 0) {
-    const debtGoods = collectedItems
-      .filter((ci,idx)=>ci.qty > items[idx]?.qty)
-      .map(ci=>`${ci.name} (${ci.unitType})`).join(", ");
-    await fsAdd("debts",{
+    const overItems = collectedItems.filter((ci, idx) => ci.qty > (items[idx]?.qty || 0));
+    const debtGoods = overItems.map(ci => `${ci.name} (${ci.unitType})`).join(", ");
+    await fsAdd("debts", {
       customerName: adv.customerName,
-      customerPhone: adv.customerPhone||"",
+      customerPhone: adv.customerPhone || "",
       goods: `Extra collected: ${debtGoods}`,
-      items: collectedItems.filter((ci,idx)=>ci.qty > items[idx]?.qty).map(ci=>({...ci})),
-      totalAmount: extraCost, amountPaid:0, balance: extraCost,
-      dueDate: futureDate(14), status:"unpaid",
-      payHistory:[],
-      note:`Auto-created: customer collected more than advance paid for (Adv #${aid.slice(-6).toUpperCase()})`
+      items: overItems.map(ci => ({ ...ci })),
+      totalAmount: extraCost, amountPaid: 0, balance: extraCost,
+      dueDate: futureDate(14), status: "unpaid",
+      payHistory: [],
+      note: `Auto-created: customer collected more than advance paid for (Adv #${aid.slice(-6).toUpperCase()})`
     });
-    toast(`Over-collection: ₦${fmt(extraCost)} added to debt automatically`,"info");
+    toast(`Over-collection: ₦${fmt(extraCost)} added to debt automatically`, "info");
   }
 
-  // 4. If items remain (partial collection) → create a new pending advance for the remainder
+  // ── 4. If items remain → create a new PENDING advance for the remainder ──
+  // The new advance carries forward:
+  //   - totalCost  = value of remaining goods
+  //   - amountPaid = proportional share of the original deposit that covers remaining goods
+  //   - balance    = what the customer still owes on the remaining goods
+  // Stock is NOT touched here — items are still reserved in inventory.
   if (remainingItems.length > 0) {
-    const remTotal = remainingItems.reduce((s,i)=>s+i.lineTotal,0);
-    const remProduct = remainingItems.map(i=>`${i.name} (${i.unitType}) ×${i.qty}`).join(", ");
-    await fsAdd("advance",{
+    const remProduct = remainingItems.map(i => `${i.name} (${i.unitType}) ×${i.qty}`).join(", ");
+    const remBalance = Math.max(0, remainingGoodsValue - amountPaidForRemaining);
+    await fsAdd("advance", {
       customerName: adv.customerName,
-      customerPhone: adv.customerPhone||"",
+      customerPhone: adv.customerPhone || "",
       product: remProduct,
       items: remainingItems,
-      totalCost: remTotal,
-      amountPaid: 0,
-      balance: remTotal,
-      expectedPickup: adv.expectedPickup||futureDate(7),
+      totalCost: remainingGoodsValue,
+      amountPaid: amountPaidForRemaining,
+      balance: remBalance,
+      expectedPickup: adv.expectedPickup || futureDate(7),
       notes: `Remaining from partial collection of advance #${aid.slice(-6).toUpperCase()}`,
-      status:"pending"
+      status: "pending",
+      stockAlreadyDeducted: true
+      // stockAlreadyDeducted = true means: if THIS record is deleted after collection
+      // of the parent advance, stock must NOT be restored (stock was already given out
+      // for the collected portion — but the remaining stock IS still reserved, so on
+      // DELETE of this pending remainder, stock WILL be restored by deleteAdvance()).
     });
-    toast(`Remaining items kept as new pending advance for ${adv.customerName}`,"info");
+    toast(`Remaining items kept as new pending advance for ${adv.customerName}`, "info");
   }
 
-  // 5. Mark original advance as collected
-  await fsUpdate("advance", aid, { status:"collected", collectedAt: Date.now() });
+  // ── 5. Mark original advance as collected ────────────────────────────────
+  await fsUpdate("advance", aid, {
+    status: "collected",
+    collectedAt: Date.now(),
+    collectedQty: collectedItems,        // snapshot of what was actually taken
+    collectedValue: collectedGoodsValue, // value of goods taken
+    amountPaidApplied: amountPaidForCollected, // portion of deposit applied to this collection
+    remainingAdvanceCreated: remainingItems.length > 0
+  });
 
   closeModal("adv-collect-modal");
-  toast("Collection recorded & added to Sales History ✅","success");
+  toast("Collection recorded & added to Sales History ✅", "success");
   renderAdvance();
   updateNavBadges();
 }
 
 async function deleteAdvance(aid) {
-  if (!confirm("Delete this advance record? Reserved stock will be restored if the advance is still pending.")) return;
   const adv = fsGet("advance").find(a=>a.id===aid);
-  // Only restore stock for pending advances — collected ones were already deducted at collection time
-  if (adv?.status === "pending" && adv?.items?.length) {
+  const isCollected = adv?.status === "collected";
+
+  // Two clear cases:
+  // - collected  → goods were physically taken out; stock must NOT be restored
+  // - pending    → goods are still reserved; restoring stock cancels the reservation
+  //
+  // This applies equally to original advances AND to remainders from a partial
+  // collection — in both cases the pending record means stock is still reserved.
+  const msg = isCollected
+    ? "Delete this advance record? This advance is collected — stock will NOT be restored (goods were already given out)."
+    : "Delete this advance record? The reserved stock will be returned to inventory since the customer has not collected yet.";
+
+  if (!confirm(msg)) return;
+
+  if (!isCollected && adv?.items?.length) {
     await _restoreItemsToStock(adv.items, `ADV-DEL-${aid.slice(-6).toUpperCase()}`, "advance_restore");
-    toast("Advance deleted — reserved stock restored","info");
+    toast("Advance cancelled — reserved stock returned to inventory", "info");
   } else {
-    toast("Deleted","info");
+    toast("Advance record deleted", "info");
   }
-  await fsDelete("advance",aid);
+  await fsDelete("advance", aid);
   renderAdvance();
   updateNavBadges();
 }
@@ -3721,6 +3976,17 @@ function openStockAdjModal() {
 }
 
 async function saveStockAdj() {
+  if (_actionTimers["stockAdj"]) return;
+  _actionTimers["stockAdj"] = true;
+  var _sb = document.querySelector("#stock-modal .btn-primary");
+  if (_sb) { _sb.disabled = true; _sb.textContent = "Applying..."; }
+  try { await _stockAdjCore(); }
+  finally {
+    setTimeout(function() { delete _actionTimers["stockAdj"]; }, 1500);
+    if (_sb) { _sb.disabled = false; _sb.textContent = "Apply Adjustment"; }
+  }
+}
+async function _stockAdjCore() {
   const pid = document.getElementById("sa-product")?.value;
   const type = document.getElementById("sa-type")?.value;
   const qty = parseInt(document.getElementById("sa-qty")?.value)||0;
@@ -3728,6 +3994,7 @@ async function saveStockAdj() {
   if (!pid || !qty) { toast("Product and quantity required","error"); return; }
   const products = fsGet("products");
   const p = products.find(x=>x.id===pid);
+  if (!p) { toast("Product not found","error"); return; }
   const delta = (type==="damage") ? -Math.abs(qty) : Math.abs(qty);
   const newQty = Math.max(0, p.qty + delta);
   await fsUpdate("products", pid, { qty: newQty });
@@ -4425,7 +4692,7 @@ function _origExportFullReportPDF() {
   doc.setDrawColor(42,42,58); doc.line(14,32,196,32);
   const sales = fsGet("sales");
   const totalRevenue = sales.reduce((a,s)=>a+s.total,0);
-  const totalProfit = sales.reduce((a,s)=>a+(s.items.reduce((b,i)=>(b+(i.price-i.cost)*i.qty),0)-s.discount),0);
+  const totalProfit = sales.reduce((a,s)=>a+(s.items.reduce((b,i)=>(b+(i.price-(i.cost||0))*i.qty),0)-s.discount),0);
   doc.setFontSize(12); doc.setTextColor(0,0,0);
   let y = 42;
   [["Total Revenue", fmt(totalRevenue)],["Total Profit", fmt(totalProfit)],
@@ -4546,7 +4813,7 @@ function deleteUser(idx) {
 
 /* ============================================================
    SETTINGS PAGE
-   ============================================================ 
+   ============================================================ */
 function renderSettings() {
   const el = document.getElementById("page-settings");
   if (!el) return;
@@ -4670,7 +4937,7 @@ function exportAllData() {
   a.download = `apexpos_backup_${today()}.json`;
   a.click();
   toast("Backup exported","success");
-} */
+}
 
 /* ============================================================
    DETAILED SALE VIEW MODAL
@@ -4690,8 +4957,9 @@ function viewSaleDetail(saleId) {
         <div class="form-label mb-8">Payment Method</div>
         <span class="badge ${payBadge(sale.payMethod)}" style="font-size:12px">${payLabel(sale.payMethod,sale.splitPayment)}</span>
         ${sale.splitPayment ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:6px;font-family:var(--font-mono);line-height:1.8">
-          <div>${sale.payMethod==="pos_cash"?"💳 POS":"🏦 Transfer"}: <strong style="color:var(--text-primary)">${fmt(sale.splitPayment.transfer||sale.splitPayment.pos||0)}</strong></div>
-          <div>💵 Cash: <strong style="color:var(--text-primary)">${fmt(sale.splitPayment.cash||0)}</strong></div>
+          ${sale.splitPayment.transfer ? `<div>🏦 Transfer: <strong style="color:var(--text-primary)">${fmt(sale.splitPayment.transfer)}</strong></div>` : ""}
+          ${sale.splitPayment.pos ? `<div>💳 POS: <strong style="color:var(--text-primary)">${fmt(sale.splitPayment.pos)}</strong></div>` : ""}
+          ${sale.splitPayment.cash ? `<div>💵 Cash: <strong style="color:var(--text-primary)">${fmt(sale.splitPayment.cash)}</strong></div>` : ""}
         </div>` : ""}
       </div>
       <div>
@@ -4734,7 +5002,7 @@ function viewSaleDetail(saleId) {
     </div>
     <span class="badge badge-green">✓ Completed</span>`,
     `<button class="btn btn-secondary" onclick="closeModal('sale-detail-modal')">Close</button>
-     <button class="btn btn-primary" onclick="showReceipt(${JSON.stringify(sale).replace(/"/g,'&quot;')},${JSON.stringify(sale.items).replace(/"/g,'&quot;')});closeModal('sale-detail-modal')">🧾 View Receipt</button>`,
+     <button class="btn btn-primary" onclick="showReceipt(${JSON.stringify(sale).replace(/'/g,"&#39;").replace(/"/g,'&quot;')},${JSON.stringify(sale.items).replace(/'/g,"&#39;").replace(/"/g,'&quot;')});closeModal('sale-detail-modal')">🧾 View Receipt</button>`,
     "modal-lg"
   );
   openModal("sale-detail-modal");
@@ -4816,7 +5084,7 @@ renderSales = function() {
     </div>
     <div class="toolbar">
       <div class="search-wrap" style="flex:2"><span class="search-icon">🔍</span>
-        <input type="text" id="sales-search" placeholder="Search TX ID, customer name, or sales rep..." oninput="filterSales()"/>
+        <input type="text" id="sales-search" placeholder="Search TX ID, customer name, or sales rep..." oninput="_dFilterSales()"/>
       </div>
       <select class="filter-select" id="sales-pay" onchange="filterSales()">
         <option value="">All Payments</option>
@@ -4916,6 +5184,7 @@ function showDailyReport() {
 function printDailyReport() {
   const content = document.querySelector("#daily-rpt-modal .modal-body");
   const w = window.open("","_blank","width=700,height=900");
+  if (!w) { toast("Pop-up blocked — allow pop-ups to print","warning"); return; }
   w.document.write(`<html><head><title>Daily Report</title>
     <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Mono&family=DM+Sans:wght@400;600&display=swap" rel="stylesheet"/>
     <style>
@@ -5140,7 +5409,7 @@ renderProducts = function() {
     </div>
     <div class="toolbar">
       <div class="search-wrap"><span class="search-icon">🔍</span>
-        <input type="text" id="prod-search" placeholder="Search by name, SKU, or category..." oninput="filterProducts()"/>
+        <input type="text" id="prod-search" placeholder="Search by name, SKU, or category..." oninput="_dFilterProducts()"/>
       </div>
       <select class="filter-select" id="prod-cat" onchange="filterProducts()">
         <option value="">All Categories</option>
@@ -5163,11 +5432,16 @@ renderProducts = function() {
 };
 
 async function quickRestock(pid) {
+  var _qrKey = "restock_" + pid;
+  if (_actionTimers[_qrKey]) return;
+  _actionTimers[_qrKey] = true;
+  setTimeout(function() { delete _actionTimers[_qrKey]; }, 1500);
   const input = document.getElementById("restock-"+pid);
   const qty = parseInt(input?.value)||0;
-  if (qty <= 0) { toast("Enter a quantity to add","error"); return; }
+  if (qty <= 0) { toast("Enter a quantity to add","error"); delete _actionTimers[_qrKey]; return; }
   const products = fsGet("products");
   const p = products.find(x=>x.id===pid);
+  if (!p) { toast("Product not found","error"); delete _actionTimers[_qrKey]; return; }
   const newQty = p.qty + qty;
   await fsUpdate("products", pid, { qty: newQty });
   await fsAdd("inventoryLogs",{ productId:pid, productName:p.name, type:"restock", qty:qty, ref:"Quick Restock", date:Date.now() });
@@ -5201,6 +5475,13 @@ renderDashboard = function() {
   el.appendChild(quickActions);
   updateNavBadges();
 };
+
+/* ============================================================
+   DEBOUNCED SEARCH WRAPPERS
+   ============================================================ */
+var _dFilterProducts    = debounce(function() { filterProducts(); },    200);
+var _dFilterPosProducts = debounce(function() { filterPosProducts(); }, 180);
+var _dFilterCustomers   = debounce(function() { filterCustomers(); },   200);
 
 /* ============================================================
    APP BOOTSTRAP
