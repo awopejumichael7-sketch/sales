@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>APEX POS — Point of Sale System</title>
+<title>Redemption building and household materials store — Point of Sale System</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -779,7 +779,7 @@ letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px}
     <div class="login-brand">
       <div class="brand-logo">
         <div class="brand-icon">A</div>
-        <div class="brand-name">APEX <span>POS</span></div>
+        <div class="brand-name">Redemption building and household materials store <span>POS</span></div>
       </div>
       <h2>Retail. Simplified.<br/>Profits. Maximized.</h2>
       <p>A complete point-of-sale system for modern retail businesses. Manage inventory, track sales, handle debts, and grow your business — all in one place.</p>
@@ -831,7 +831,7 @@ letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px}
     <div class="sidebar-header">
       <div class="sidebar-brand">
         <div class="sidebar-icon">A</div>
-        <div class="sidebar-title">APEX <span>POS</span></div>
+        <div class="sidebar-title">Redemption building and household materials store <span>POS</span></div>
       </div>
     </div>
     <div class="sidebar-user">
@@ -2232,7 +2232,7 @@ function showReceipt(sale, items) {
   const receiptHtml = `
     <div class="receipt" id="receipt-print">
       <div class="receipt-header">
-        <div class="receipt-store">APEX STORE</div>
+        <div class="receipt-store">Redemption building and household materials store</div>
         <div class="receipt-tagline">Quality Products. Trusted Service.</div>
         <div class="receipt-meta">Transaction ID: ${sale.txId}<br/>
         ${fmtDateTime(sale.date)}</div>
@@ -2427,7 +2427,7 @@ function readVariantRows() {
 function openProductModal(pid) {
   const p = pid ? fsGet("products").find(x=>x.id===pid) : null;
   const title = p ? "Edit Product" : "Add New Product";
-  const cats = ["Grains","Beverages","Groceries","Cooking","Condiments","Dairy","Snacks","Canned","Household","Other"];
+  const cats = ["Bricklayer","Carpenter","Welder","Painter","Plumber","Dairy","Architect","Surveyor","Household","Other"];
   _variantCount = 0;
 
   // Build initial variant rows HTML
@@ -4553,7 +4553,7 @@ function exportPeriodExcel() {
     Total:a.totalCost, Balance:a.balance, Status:a.status, Pickup:a.expectedPickup
   }))), "Advance Payments");
 
-  XLSX.writeFile(wb, `apex_pos_${reportPeriod}_report.xlsx`);
+  XLSX.writeFile(wb, `Redemption_pos_${reportPeriod}_report.xlsx`);
   toast("Report exported to Excel","success","Export Done");
 }
 
@@ -4817,8 +4817,8 @@ function deleteUser(idx) {
 function renderSettings() {
   const el = document.getElementById("page-settings");
   if (!el) return;
-  const storeName = Store.getOne("storeName") || "APEX STORE";
-  const storePhone = Store.getOne("storePhone") || "";
+  const storeName = Store.getOne("storeName") || "Redemption building and household materials store";
+  const storePhone = Store.getOne("storePhone") || "08062406538";
   const storeAddress = Store.getOne("storeAddress") || "";
   const taxRate = Store.getOne("taxRate") || 0;
   const currency = Store.getOne("currency") || "₦";
