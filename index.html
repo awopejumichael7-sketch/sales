@@ -930,9 +930,9 @@ const FIREBASE_CONFIG = {
    USER ACCOUNTS (hardcoded as specified)
    ============================================================ */
 const USERS = [
-  { username: "admin",  password: "admin123", role: "admin",  name: "Admin User",    avatar: "AU" },
-  { username: "sales1", password: "sales123", role: "sales",  name: "Sarah Johnson", avatar: "SJ" },
-  { username: "sales2", password: "sales456", role: "sales",  name: "Mike Chen",     avatar: "MC" }
+  { username: "mamaala",  password: "cement", role: "admin",  name: "Admin User",    avatar: "AL" },
+  { username: "sales1", password: "sales123", role: "sales",  name: "Hannah", avatar: "HN" },
+  { username: "sales2", password: "sales", role: "sales",  name: "Mike Chen",     avatar: "MC" }
 ];
 
 /* ============================================================
@@ -4792,7 +4792,7 @@ function deleteUser(idx) {
 
 /* ============================================================
    SETTINGS PAGE
-   ============================================================ */
+ 
 function renderSettings() {
   const el = document.getElementById("page-settings");
   if (!el) return;
@@ -4953,7 +4953,7 @@ function exportAllData() {
   a.click();
   toast("Backup exported","success");
 }
-
+  ============================================================ */
 /* ============================================================
    DETAILED SALE VIEW MODAL
    ============================================================ */
